@@ -34,7 +34,7 @@ We received questions about how the NSA hardening guide differs from the OWASP T
 | Namespaces, NetworkPolicies, default deny | K04, K05 | Done |
 | Resource policies (```LimitRange```, ```ResourceQuota```) | None | Needed to add some new ```kubectl get``` handlers for those 2 resource types. |
 | Control plane (```etcd```, ```TLS```, ```kubeconfig```, API exposure) | K06 | Needed some new files on the node (an etcd manifest or the ```kube-apiserver``` flags). |
-| Secrets encrypted at rest | K03 is about leaked logs, not storage | We needed to add an ```EncryptionConfiguration``` file that uses the identity provider. |
+| Secrets encrypted at rest | K03 is about leaked logs<br/> (not related to storage) | We needed to add an ```EncryptionConfiguration``` file.<br/> This file should use the identity provider. |
 | Authentication and RBAC | K02, K09 | Done |
-| Upgrades and patching | K06 (unsupported v1.30.2), K07 (end-of-life PHP image) | Done |
+| Upgrades and patching | K06 (unsupported v1.30.2), <br/>K07 (end-of-life PHP image) | Done |
 | Kubelet hardening | none | The ```/var/lib/kubelet/config.yaml``` exists but is already hardened. Turning ```anonymous.enabled``` on, or setting ```readOnlyPort: 10255```, gives users a new finding. |
