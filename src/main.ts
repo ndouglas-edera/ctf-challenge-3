@@ -391,12 +391,12 @@ const NSA_GUIDE = "https://media.defense.gov/2022/Aug/29/2003066362/-1/-1/0/CTR_
  */
 const ADMISSION_FLAG = "EDERA{NSA_ADMISSION_ENFORCED}";
 const IMAGE_FLAG = "EDERA{NSA_IMAGE_SCANNING}";
-const RBAC_FLAG = "EDERA{NSA_LEAST_PRIVILEGE_RBAC}";
 
 /*
  * Stages follow the order of the NSA/CISA Kubernetes Hardening Guide v1.2:
- * Pod security, network separation and hardening, authentication and
- * authorization, audit logging and threat detection, then upgrades.
+ * Pod security, network separation and hardening, then authentication and
+ * authorization. Twelve stages keep the objectives list level with the
+ * terminal.
  */
 const stages: Stage[] = [
   /* ---- Kubernetes Pod security ------------------------------------------ */
@@ -635,123 +635,6 @@ const stages: Stage[] = [
       "readOnlyPort: 10255 served /pods without authentication, including images, service accounts and the IAM role ARN.",
       "Turning off anonymous auth on 10250 doesn't help if the read-only port is open beside it.",
       "Set readOnlyPort: 0 and keep the kubelet's authentication and Webhook authorization on.",
-    ],
-  },
-  {
-    title: "AuthN/AuthZ · Anonymous access",
-    objective: "Someone with no credentials at all can read more of this cluster than they should. Find the binding responsible.",
-    brief: [
-      `NSA/CISA guide, "Authentication": ${NSA_GUIDE}`,
-      "Read up on anonymous requests: https://kubernetes.io/docs/reference/access-authn-authz/authentication/#anonymous-requests",
-      "Submit the binding name.",
-    ],
-    answers: ["cluster-status-public", "clusterrolebinding/cluster-status-public"],
-    nudges: {
-      "system:unauthenticated": "That's the group being granted access. Which binding grants it?",
-      "system:anonymous": "That's the identity anonymous requests get. Which binding gives it access?",
-      "cluster-status-reader": "That's the role. Which binding hands it to anonymous users?",
-      "--anonymous-auth=false": "That's the fix. Which binding is the problem?",
-      "anonymous-auth=false": "That's the fix. Which binding is the problem?",
-      "--anonymous-auth=true": "That's what lets anonymous requests in. Which binding then gives them something to read?",
-    },
-    flag: "EDERA{NSA_ANONYMOUS_AUTH}",
-    reward: [
-      "cluster-status-public bound cluster-status-reader to system:unauthenticated.",
-      "Anyone who could reach the API server could list every pod, node and namespace, with no credentials.",
-      "Never grant RBAC to system:unauthenticated, and set --anonymous-auth=false where you can (test it first).",
-    ],
-  },
-  {
-    title: "AuthN/AuthZ · Role-based access control",
-    objective: "Find the service account bound to excessive permissions.",
-    brief: [
-      `NSA/CISA guide, "Role-based access control": ${NSA_GUIDE}`,
-      "Read up on RBAC good practices: https://kubernetes.io/docs/concepts/security/rbac-good-practices/",
-      "Submit the affected service account.",
-    ],
-    answers: ["report-bot", "customer-b/report-bot", "system:serviceaccount:customer-b:report-bot"],
-    nudges: {
-      "report-bot-admin": "That's the binding. Which service account does it grant cluster-admin to?",
-      "cluster-admin": "That's the role. Who holds it that shouldn't?",
-      "report-bot-token": "That's its long-lived token. Submit the service account.",
-    },
-    flag: RBAC_FLAG,
-    reward: [
-      "report-bot-admin bound a reporting service account to cluster-admin, and its long-lived token Secret never expires.",
-      "RBAC should follow least privilege: a namespaced Role with only the verbs and resources it needs.",
-      "Avoid wildcard and cluster-wide grants, and prefer short-lived projected tokens to token Secrets.",
-    ],
-  },
-
-  /* ---- Audit logging and threat detection ------------------------------- */
-  {
-    title: "Audit · Audit policy",
-    objective: "The API server's audit policy has a blind spot. Which resource does it never record?",
-    brief: [
-      `NSA/CISA guide, "Kubernetes native audit logging configuration": ${NSA_GUIDE}`,
-      "Read up on audit policy: https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/#audit-policy",
-      "Submit the resource name.",
-    ],
-    answers: ["secrets", "secret"],
-    nudges: {
-      "none": "That's the level. Which resource gets it?",
-      "level: none": "That's the level. Which resource gets it?",
-      "system:kube-proxy": "That rule only drops kube-proxy's watches, which is normal noise. Look for one that hides a whole resource.",
-      "requestreceived": "Omitting that stage is normal. Look for a rule that drops a resource entirely.",
-    },
-    flag: "EDERA{NSA_AUDIT_POLICY}",
-    reward: [
-      "The first rule matched every Secret request at level None, so reads of Secrets were never logged.",
-      "Combined with report-bot's cluster-admin token, an attacker could read every Secret and leave no trace.",
-      "Log Secrets at Metadata level (never RequestResponse, which would log the values), and review rule order.",
-    ],
-  },
-  {
-    title: "Audit · Threat detection",
-    objective: "Something suspicious ran on this node, and the alert never reached anyone. What process was it?",
-    brief: [
-      `NSA/CISA guide, "Alerting" and "Threat detection": ${NSA_GUIDE}`,
-      "Read up on logging architecture: https://kubernetes.io/docs/concepts/cluster-administration/logging/",
-      "Submit the process name.",
-    ],
-    answers: ["kworkerd", "/tmp/.cache/kworkerd"],
-    nudges: {
-      "recommendation-c": "That's where it ran. What process did the monitor see?",
-      "edera-ebpf-test": "That's the monitor. What did it detect?",
-      "su": "That's how it got root. What did it run?",
-      "/usr/bin/su": "That's how it got root. What did it run?",
-    },
-    flag: "EDERA{NSA_THREAT_DETECTION}",
-    reward: [
-      "The monitor caught /tmp/.cache/kworkerd running as root in recommendation-c.",
-      "Its alert webhook returned 404, the alert was dropped, and nobody was told.",
-      "Detection without delivery is no detection: alert on failed alerts, and test the path end to end.",
-    ],
-  },
-
-  /* ---- Upgrading and application security practices --------------------- */
-  {
-    title: "Upgrades · Supported versions",
-    objective: "The API server tells anyone who asks which version it runs, no credentials needed. What exact version is it?",
-    brief: [
-      `NSA/CISA guide, "Upgrading and application security practices": ${NSA_GUIDE}`,
-      "Read up on the Kubernetes release cycle: https://kubernetes.io/releases/",
-      "Submit the exact version string.",
-    ],
-    answers: ["v1.30.2", "1.30.2"],
-    nudges: {
-      "v1.34.1": "That's your kubectl client's version. What does the API server report?",
-      "1.34.1": "That's your kubectl client's version. What does the API server report?",
-      "v1.31.4": "That's the kubelet on worker-02. What does the API server report?",
-      "1.31.4": "That's the kubelet on worker-02. What does the API server report?",
-      "1.30": "Close. Which exact patch release?",
-      "v1.30": "Close. Which exact patch release?",
-    },
-    flag: "EDERA{NSA_UPGRADES}",
-    reward: [
-      "/version answered an anonymous request with the exact build: v1.30.2.",
-      "1.30 is out of support, so that build will never get fixes, and an attacker can match it against known CVEs.",
-      "Stay on a supported minor release, apply patch releases promptly, and keep the API server off untrusted networks.",
     ],
   },
 ];
@@ -1380,15 +1263,6 @@ const AUDIT_FILES: Record<string, string> = {
     "",
     "## Authentication and authorization",
     "- [ ] kubelet: anonymous auth off, Webhook authz, no unauthenticated ports",
-    "- [ ] Nothing bound to system:unauthenticated",
-    "- [ ] No service account holds more than it needs",
-    "",
-    "## Audit logging and threat detection",
-    "- [ ] Audit policy covers sensitive resources. Rules are first-match!",
-    "- [ ] Runtime alerts actually reach someone",
-    "",
-    "## Upgrades",
-    "- [ ] Control plane on a supported minor release",
   ].join("\n"),
 
   "/home/ivy/.bash_history": [
@@ -1451,30 +1325,6 @@ const AUDIT_FILES: Record<string, string> = {
     "          keys:",
     "            - name: key1",
     "              secret: bGFiLW9ubHktbm90LWEtcmVhbC1rZXktMzJieXRlcyE=",
-  ].join("\n"),
-
-  "/home/ivy/backups/control-plane/audit-policy.yaml": [
-    "apiVersion: audit.k8s.io/v1",
-    "kind: Policy",
-    "omitStages:",
-    "  - RequestReceived",
-    "rules:",
-    "  # OPS-2187: Secret reads were flooding the SIEM.",
-    "  - level: None",
-    "    resources:",
-    '      - group: ""',
-    '        resources: ["secrets"]',
-    "  - level: None",
-    '    users: ["system:kube-proxy"]',
-    '    verbs: ["watch"]',
-    "  - level: Metadata",
-    "    resources:",
-    '      - group: ""',
-    '        resources: ["configmaps"]',
-    "  - level: RequestResponse",
-    "    resources:",
-    '      - group: "rbac.authorization.k8s.io"',
-    "  - level: Metadata",
   ].join("\n"),
 };
 Object.assign(virtualFiles, AUDIT_FILES);
@@ -5524,37 +5374,16 @@ function renderArchitecture(): string {
   const hostPods = pods.filter((pod) => !pod.zone && state.inspected.has(pod.name));
   const onHost = hostPods.length > 0;
 
-  /*
-   * RBAC: once the cluster-admin binding has been captured, every Secret is
-   * shown as reachable, because that token can read them all through the
-   * API regardless of which zone a workload runs in. Before that, only the
-   * Secrets the player has listed appear, as neutral chips.
-   */
-  const adminBinding = clusterRoleBindings.find((binding) => binding.name === "report-bot-admin");
-  const adminSubject = adminBinding?.subjects.find((subject) => subject.kind === "ServiceAccount");
-  const rbacFound = state.captured.includes(RBAC_FLAG) && Boolean(adminSubject);
-  const adminToken = secrets.find(
-    (secret) => secret.annotations?.["kubernetes.io/service-account.name"] === adminSubject?.name &&
-      secret.namespace === adminSubject?.namespace,
-  );
+  /* Secrets appear as neutral chips once the player has listed them. */
   const shownSecrets = secrets.filter(
-    (secret) => rbacFound || state.secretsSeen.has(`${secret.namespace}/${secret.name}`),
+    (secret) => state.secretsSeen.has(`${secret.namespace}/${secret.name}`),
   );
   const secretNamespaces = new Set(shownSecrets.map((secret) => secret.namespace));
 
   const secretChips = (namespace: string): string => {
     const chips = shownSecrets
       .filter((secret) => secret.namespace === namespace)
-      .map((secret) => {
-        const isAdminToken = rbacFound && secret === adminToken;
-        const classes = ["secret-chip", rbacFound ? "secret-exposed" : "", isAdminToken ? "secret-admin" : ""].join(" ");
-        const title = isAdminToken
-          ? "cluster-admin token"
-          : rbacFound
-            ? `readable by ${adminSubject?.namespace}/${adminSubject?.name}`
-            : secret.type;
-        return `<span class="${classes}" title="${escapeHtml(title)}">${isAdminToken ? "admin token · " : ""}${escapeHtml(secret.name)}</span>`;
-      })
+      .map((secret) => `<span class="secret-chip" title="${escapeHtml(secret.type)}">${escapeHtml(secret.name)}</span>`)
       .join("");
     return chips ? `<div class="secret-chips">${chips}</div>` : "";
   };
@@ -5596,30 +5425,17 @@ function renderArchitecture(): string {
       ? `<div class="tenant-card tenant-blocked"><span class="tenant-dot"></span><strong>${BLOCKED_NAMESPACE}/${PAYMENTS.deployment}</strong><span class="tenant-caption">0/1 · denied by ${ONBOARDING_POLICY}</span></div>`
       : "";
 
-  const exposedNamespaces = new Set(secrets.map((secret) => secret.namespace)).size;
-
-  const apiBox = rbacFound && adminBinding && adminSubject
-    ? `
-      <div class="api-box">
-        <strong>KUBERNETES API · RBAC</strong>
-        <span><code>${adminSubject.namespace}/${adminSubject.name}</code> → <code>${adminBinding.roleRef.kind}/${adminBinding.roleRef.name}</code> · reads every Secret in every namespace</span>
-      </div>
-      <div class="kernel-connector api-connector"></div>`
-    : "";
-
   return `
-    <section class="architecture ${found || rbacFound || onHost ? "architecture-compromised" : ""}">
+    <section class="architecture ${found || onHost ? "architecture-compromised" : ""}">
       <div class="section-heading">
         <div>
           <span class="eyebrow">CURRENT ARCHITECTURE</span>
           <h2>Edera-isolated workloads</h2>
         </div>
-        <span class="status-pill ${found || rbacFound || onHost ? "status-danger" : "status-unknown"}">
-          ${rbacFound ? "CLUSTER-ADMIN TOKEN EXPOSED" : onHost ? "WORKLOAD ON HOST KERNEL" : found ? "PRIVILEGE ESCALATION ENABLED" : `${pods.length} RUNNING WORKLOAD${pods.length === 1 ? "" : "S"}`}
+        <span class="status-pill ${found || onHost ? "status-danger" : "status-unknown"}">
+          ${onHost ? "WORKLOAD ON HOST KERNEL" : found ? "PRIVILEGE ESCALATION ENABLED" : `${pods.length} RUNNING WORKLOAD${pods.length === 1 ? "" : "S"}`}
         </span>
       </div>
-
-      ${apiBox}
 
       ${pods.length > 0 || orphanCards || blockedCard
         ? `<div class="tenant-grid">${cards}${orphanCards}${blockedCard}</div>`
@@ -5630,15 +5446,6 @@ function renderArchitecture(): string {
         <strong>HOST KERNEL</strong>
         <span>${NODE.kernelVersion} · ${NODE.name}</span>
       </div>
-
-      ${rbacFound && adminSubject ? `
-        <div class="blast-radius">
-          <span class="blast-icon">!</span>
-          <div>
-            <strong>${adminSubject.namespace}/${adminSubject.name} is bound to cluster-admin</strong>
-            <span>Its long-lived token can read all ${secrets.length} Secrets in ${exposedNamespaces} namespaces. Zones isolate kernels, not API access, so scope service accounts to the namespaces and verbs they need.</span>
-          </div>
-        </div>` : ""}
 
       ${onHost ? `
         <div class="blast-radius">
