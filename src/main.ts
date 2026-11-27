@@ -4969,18 +4969,18 @@ function render(): void {
             <span class="eyebrow">MISSION BRIEF</span>
             <h1>
               CTF Challenge
-              <em>#2</em>
+              <em>#3</em>
             </h1>
 
   <div className="mission-description">
   <p>
-    <strong>Kubernetes</strong> is deliberately misconfigured here.<br> 
-    Use the <i><a href="https://kubernetes-top10.owasp.org/">OWASP Top 10 for Kubernetes</a></i> as your guide.
+    The <strong>NSA</strong> are concerned your cluster is not correctly hardened<br> 
+    Use the joint<i><a href="https://media.defense.gov/2022/Aug/29/2003066362/-1/-1/0/CTR_KUBERNETES_HARDENING_GUIDANCE_1.2_20220829.PDF"></a>CISA/NSA Hardening Guide</i> to find flaws.
   </p>
 
   <p>
     Find <strong>all flaws</strong>
-    before production is compromised.<br> 
+    before the US government shuts down your operations.<br> 
     Capture all <b>10 flags</b> to complete the exercise.
   </p>
 </div>
