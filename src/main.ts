@@ -57,7 +57,7 @@ const NODE = {
   },
 };
 
-/* K04 namespace onboarding; defined early because startup manifests are applied below. */
+/* Namespace onboarding (admission enforcement stage); defined early because startup manifests are applied below. */
 const ONBOARDING_KEY = "edera.dev/isolation";
 const ONBOARDING_VALUE = "enforced";
 const ONBOARDING_POLICY = "edera-tenant-onboarding";
@@ -158,6 +158,24 @@ const pods: Pod[] = [
     },
     zone: "zone-recommendation-c",
     image: "ghcr.io/acme/recommendation:2.2.0",
+  },
+  {
+    /*
+     * NSA/CISA "Hardening container environments": this pod has no
+     * runtimeClassName, so /etc/edera/cri.toml falls it back to runc and it
+     * shares worker-02's kernel. It still carries the runtime=edera label
+     * every other workload has, which is the trap.
+     */
+    name: "metrics-exporter",
+    namespace: "platform",
+    app: "metrics-exporter",
+    node: NODE.name,
+    status: "Running",
+    privileged: false,
+    runtimeClass: null,
+    annotations: {},
+    zone: null,
+    image: "ghcr.io/acme/metrics-exporter:0.4.1",
   },
 ];
 
@@ -365,47 +383,123 @@ interface Stage {
   reward: string[];
 }
 
-const K04_FLAG = "EDERA{K04_POLICY_ENFORCED}";
-const K07_FLAG = "EDERA{K07_VULNERABLE_COMPONENT}";
+const NSA_GUIDE = "https://media.defense.gov/2022/Aug/29/2003066362/-1/-1/0/CTR_KUBERNETES_HARDENING_GUIDANCE_1.2_20220829.PDF";
 
+/*
+ * Flags whose stages are captured by doing something (labelling a namespace,
+ * removing an image) rather than only by submitting an answer.
+ */
+const ADMISSION_FLAG = "EDERA{NSA_ADMISSION_ENFORCED}";
+const IMAGE_FLAG = "EDERA{NSA_IMAGE_SCANNING}";
+const RBAC_FLAG = "EDERA{NSA_LEAST_PRIVILEGE_RBAC}";
+
+/*
+ * Stages follow the order of the NSA/CISA Kubernetes Hardening Guide v1.2:
+ * Pod security, network separation and hardening, authentication and
+ * authorization, audit logging and threat detection, then upgrades.
+ */
 const stages: Stage[] = [
+  /* ---- Kubernetes Pod security ------------------------------------------ */
   {
-    title: "K01 · Insecure workload configurations",
+    title: "Pod security · Non-root containers",
+    objective: "The guide says containers should run as a non-root user. Find the pod that runs as root.",
+    brief: [
+      `NSA/CISA guide, "Non-root containers and rootless container engines": ${NSA_GUIDE}`,
+      "Read more about Security Contexts: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/",
+      "Submit the pod name.",
+    ],
+    answers: ["image-processor-a", "customer-a/image-processor-a"],
+    nudges: {
+      "image-processor": "That's the app. Submit the pod's name.",
+      "runasuser: 0": "That's the setting. Which pod has it?",
+      "0": "That's root's UID. Which pod runs as it?",
+    },
+    flag: "EDERA{NSA_NON_ROOT}",
+    reward: [
+      "image-processor-a set runAsNonRoot: false and runAsUser: 0, and its root filesystem was writable too.",
+      "A process running as root inside a container is one bug away from root on whatever kernel it shares.",
+      "Set runAsNonRoot: true, a non-zero runAsUser, and readOnlyRootFilesystem: true.",
+    ],
+  },
+  {
+    title: "Pod security · Privilege escalation",
     objective: "Find the pod that allows privilege escalation.",
-    brief: ["Read more about Security Contexts: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/", "Submit the pod name."],
+    brief: [
+      `NSA/CISA guide, "Kubernetes Pod security": ${NSA_GUIDE}`,
+      "Read more about Security Contexts: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/",
+      "Submit the pod name.",
+    ],
     answers: ["recommendation-c", "customer-c/recommendation-c"],
-    flag: "EDERA{K01_INSECURE_WORKLOAD}",
-    reward: ["`allowPrivilegeEscalation: true` permits a process to gain privileges beyond its parent, including through setuid programs.", "Set `allowPrivilegeEscalation: false` and apply a consistent workload security baseline."],
+    flag: "EDERA{NSA_NO_PRIVILEGE_ESCALATION}",
+    reward: [
+      "`allowPrivilegeEscalation: true` permits a process to gain privileges beyond its parent, including through setuid programs.",
+      "Set `allowPrivilegeEscalation: false` and apply a consistent workload security baseline.",
+    ],
   },
   {
-    title: "K02 · Overly-permissive authorisation",
-    objective: "Find the service account bound to excessive permissions.",
-    brief: ["Read up on RBAC good practices: https://kubernetes.io/docs/concepts/security/rbac-good-practices/", "Submit the affected service account."],
-    answers: ["report-bot", "customer-b/report-bot", "system:serviceaccount:customer-b:report-bot"],
-    flag: "EDERA{K02_EXCESSIVE_PERMISSIONS}",
-    reward: ["RBAC should follow least privilege.", "Avoid wildcard and unnecessary cluster-wide permissions."],
+    title: "Pod security · Sandboxed runtime",
+    objective: "Every workload is labelled runtime=edera, but one isn't sandboxed and shares the node's kernel. Find it.",
+    brief: [
+      `NSA/CISA guide, "Hardening container environments" (hypervisor-backed sandboxes): ${NSA_GUIDE}`,
+      "Read up on RuntimeClass: https://kubernetes.io/docs/concepts/containers/runtime-class/",
+      "Submit the pod name.",
+    ],
+    answers: ["metrics-exporter", "platform/metrics-exporter"],
+    nudges: {
+      "runc": "That's the runtime it fell back to. Which pod is running on it?",
+      "runtime=edera": "That's the label. Labels are claims: which pod's spec doesn't back it up?",
+      "platform": "Right namespace. Which pod in it?",
+    },
+    flag: "EDERA{NSA_SANDBOXED_RUNTIME}",
+    reward: [
+      "metrics-exporter has no runtimeClassName, so the CRI fell back to runc and it runs on worker-02's own kernel.",
+      "Its runtime=edera label was only ever a claim. Nothing checked it against the spec.",
+      "Require a sandboxed RuntimeClass at admission, rather than trusting labels or convention.",
+    ],
   },
   {
-    title: "K03 · Secrets management failures",
-    objective: "Find the credential leaked in plaintext in a workload's logs.",
-    brief: ["Read up on Secrets good practices: https://kubernetes.io/docs/concepts/security/secrets-good-practices/", "Submit the leaked secret value."],
-    answers: ["bt-lab-7f3a9c2e5d1b", "billing_token=bt-lab-7f3a9c2e5d1b"],
-    nudges: { "billing-api-token": "Close: that's the Secret's name. Submit the leaked value itself." },
-    flag: "EDERA{K03_EXPOSED_SECRET}",
-    reward: ["Anyone with `get` on `pods/log`, or access to your log platform, could read that token.", "Never log configuration or environment values; rotate the credential and restrict `pods/log` access."],
+    title: "Pod security · Image scanning",
+    objective: "An end-of-life PHP image with known CVEs is sitting in the node's Edera image cache. Find it and remove it.",
+    brief: [
+      `NSA/CISA guide, "Building secure container images": ${NSA_GUIDE}`,
+      "Read up on managing images with the protect CLI: https://docs.edera.dev/guides/cli-user-guide/#removing-images",
+      "The flag is captured automatically once the image is removed.",
+    ],
+    answers: ["sha256:a766a07ccdc7b9dae4f45d0f811a7dfbd5845fe610514b313b3aba831fc7b44b"],
+    flag: IMAGE_FLAG,
+    reward: [
+      "PHP 7.4 has had no security fixes since November 2022, so later CVEs stay unpatched.",
+      "A zone limits the blast radius of a vulnerable app, but it doesn't patch PHP.",
+      "Scan images before they reach a node, prune images you don't run, and keep base images on supported releases.",
+    ],
   },
   {
-    title: "K04 · Lack of cluster-level policies",
+    title: "Pod security · Admission enforcement",
     objective: "A tenant's workload is being blocked from starting. Find out why and get it running.",
-    brief: ["Read up on Kyverno validate rules: https://release-1-18-0.kyverno.io/docs/policy-types/cluster-policy/validate/", "The flag is captured automatically once the workload is admitted."],
+    brief: [
+      `NSA/CISA guide, "Pod security enforcement": ${NSA_GUIDE}`,
+      "PodSecurityPolicy, which older guidance relied on, was removed in Kubernetes 1.25. This cluster uses Kyverno instead.",
+      "Read up on Kyverno validate rules: https://release-1-18-0.kyverno.io/docs/policy-types/cluster-policy/validate/",
+      "The flag is captured automatically once the workload is admitted.",
+    ],
     answers: ["edera.dev/isolation=enforced"],
-    flag: "EDERA{K04_POLICY_ENFORCED}",
-    reward: ["edera-tenant-onboarding denied every Pod in customer-e until the namespace opted in.", "Once labelled, payments-worker was admitted and started in its own Edera zone.", "Enforce admission policy cluster-wide, rather than relying on convention."],
+    flag: ADMISSION_FLAG,
+    reward: [
+      "edera-tenant-onboarding denied every Pod in customer-e until the namespace opted in.",
+      "Once labelled, payments-worker was admitted and started in its own Edera zone.",
+      "Enforce admission policy cluster-wide, rather than relying on convention.",
+    ],
   },
+
+  /* ---- Network separation and hardening --------------------------------- */
   {
-    title: "K05 · Missing network segmentation",
+    title: "Network · Network policies",
     objective: "One NetworkPolicy isn't protecting what its author intended. Find it.",
-    brief: ["Read up on NetworkPolicies: https://kubernetes.io/docs/concepts/services-networking/network-policies/", "Submit the name of the misconfigured NetworkPolicy."],
+    brief: [
+      `NSA/CISA guide, "Network policies": ${NSA_GUIDE}`,
+      "Read up on NetworkPolicies: https://kubernetes.io/docs/concepts/services-networking/network-policies/",
+      "Submit the name of the misconfigured NetworkPolicy.",
+    ],
     answers: ["billing-api-ingress", "customer-b/billing-api-ingress"],
     nudges: {
       "customer-b": "Right namespace. Which NetworkPolicy in it is misconfigured?",
@@ -413,48 +507,144 @@ const stages: Stage[] = [
       "app=biling-api": "That's the typo! Submit the name of the NetworkPolicy it's in.",
       "billing-api": "That's the workload left exposed. Submit the name of the NetworkPolicy that should have protected it.",
     },
-    flag: "EDERA{K05_NETWORK_SEGMENTATION}",
-    reward: ["billing-api-ingress selected app=biling-api, which matches no pods.", "With nothing selected, billing-api accepted traffic from every namespace.", "A selector typo fails silently: pair a default-deny with allow rules, and test the flows."],
+    flag: "EDERA{NSA_NETWORK_POLICY}",
+    reward: [
+      "billing-api-ingress selected app=biling-api, which matches no pods.",
+      "With nothing selected, billing-api accepted traffic from every namespace.",
+      "A selector typo fails silently: pair a default-deny with allow rules, and test the flows.",
+    ],
   },
   {
-    title: "K06 · Overly-exposed components",
-    objective: "The API server tells anyone who asks, no credentials needed. What exact version does it leak?",
-    brief: ["Read up on the Kubernetes API: https://kubernetes.io/docs/concepts/overview/kubernetes-api/", "Submit the exact version string."],
-    answers: ["v1.30.2", "1.30.2"],
+    title: "Network · Resource policies",
+    objective: "One tenant namespace has no ResourceQuota or LimitRange, so nothing stops it consuming the node. Which namespace?",
+    brief: [
+      `NSA/CISA guide, "Resource policies": ${NSA_GUIDE}`,
+      "Read up on Resource Quotas: https://kubernetes.io/docs/concepts/policy/resource-quotas/",
+      "Submit the namespace.",
+    ],
+    answers: ["customer-c"],
     nudges: {
-      "v1.34.1": "That's your kubectl client's version. What does the API server report?",
-      "1.34.1": "That's your kubectl client's version. What does the API server report?",
-      "1.30": "Close. Which exact patch release?",
-      "v1.30": "Close. Which exact patch release?",
+      "recommendation-c": "That's the pod burning CPU. Which namespace has nothing to stop it?",
+      "resourcequota": "That's the missing control. Which namespace is missing it?",
+      "limitrange": "That's the missing control. Which namespace is missing it?",
     },
-    flag: "EDERA{K06_EXPOSED_COMPONENT}",
-    reward: ["/version answered an anonymous request with the exact build: v1.30.2.", "That release is out of support, so an attacker can match it against known CVEs.", "Keep the API server off untrusted networks, and treat version data as reconnaissance."],
+    flag: "EDERA{NSA_RESOURCE_POLICY}",
+    reward: [
+      "customer-c had no ResourceQuota and no LimitRange, and recommendation-c was pinned at its CPU ceiling.",
+      "Its zone capped that one pod at 2 vCPUs, but without a quota the tenant can simply schedule more pods.",
+      "Give every tenant namespace a LimitRange for defaults and a ResourceQuota for totals.",
+    ],
   },
   {
-    title: "K07 · Misconfigured components",
-    objective: "An end-of-life PHP image with known CVEs is sitting in the node's Edera image cache. Find it and remove it.",
-    brief: ["Read up on managing images with the protect CLI: https://docs.edera.dev/guides/cli-user-guide/#removing-images", "The flag is captured automatically once the image is removed."],
-    answers: ["sha256:a766a07ccdc7b9dae4f45d0f811a7dfbd5845fe610514b313b3aba831fc7b44b"],
-    flag: "EDERA{K07_VULNERABLE_COMPONENT}",
-    reward: ["PHP 7.4 has had no security fixes since November 2022, so later CVEs stay unpatched.", "A zone limits the blast radius of a vulnerable app, but it doesn't patch PHP.", "Prune images you don't run, and keep base images on supported releases."],
+    title: "Network · Control plane (etcd)",
+    objective: "The cluster's datastore accepts plaintext connections from this worker, with no client certificate. Submit the endpoint it's listening on.",
+    brief: [
+      `NSA/CISA guide, "Control plane hardening" and "Etcd": ${NSA_GUIDE}`,
+      "Read up on securing etcd: https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#securing-etcd-clusters",
+      "Submit the endpoint, including the scheme.",
+    ],
+    answers: ["http://10.10.0.10:2379"],
+    nudges: {
+      "10.10.0.10:2379": "Right host and port. Submit it with the scheme etcd is actually answering on.",
+      "https://10.10.0.10:2379": "Look again at the scheme it accepts.",
+      "2379": "Right port. Submit the full endpoint: scheme, host and port.",
+      "etcd": "Yes, etcd. Where is it listening?",
+    },
+    flag: "EDERA{NSA_ETCD_EXPOSED}",
+    reward: [
+      "etcd answered on http://10.10.0.10:2379: no TLS, no client certificate, reachable from a worker node.",
+      "Anyone who can reach that port can read or rewrite every object in the cluster, bypassing RBAC and the audit log.",
+      "Firewall etcd so only the API servers can reach it, and require mutual TLS with --client-cert-auth=true.",
+    ],
   },
   {
-    title: "K08 · Cluster-to-cloud lateral movement",
+    title: "Network · Secrets at rest",
+    objective: "The API server has an encryption config for Secrets, yet etcd still holds them in plaintext. Which provider is writing them?",
+    brief: [
+      `NSA/CISA guide, "Secrets" (encrypting Secrets at rest): ${NSA_GUIDE}`,
+      "Read up on encrypting data at rest: https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/",
+      "Submit the provider name.",
+    ],
+    answers: ["identity", "identity: {}", "identity:{}"],
+    nudges: {
+      "aescbc": "That provider is configured, but is it the one that writes? Order matters.",
+      "key1": "That's an aescbc key. Is aescbc the provider that writes?",
+      "encryptionconfiguration": "That's the kind. Which provider in it is doing the writing?",
+    },
+    flag: "EDERA{NSA_SECRETS_AT_REST}",
+    reward: [
+      "The first provider in an EncryptionConfiguration encrypts new writes. Here it was identity, which stores plaintext.",
+      "The aescbc key was there, but only for reading. Every Secret in etcd, and in every etcd backup, was readable.",
+      "Put a real provider (KMS v2 or aescbc) first, then rewrite existing Secrets so they are re-encrypted.",
+    ],
+  },
+  {
+    title: "Network · Secrets in logs",
+    objective: "Find the credential leaked in plaintext in a workload's logs.",
+    brief: [
+      `NSA/CISA guide, "Secrets": ${NSA_GUIDE}`,
+      "Read up on Secrets good practices: https://kubernetes.io/docs/concepts/security/secrets-good-practices/",
+      "Submit the leaked secret value.",
+    ],
+    answers: ["bt-lab-7f3a9c2e5d1b", "billing_token=bt-lab-7f3a9c2e5d1b"],
+    nudges: { "billing-api-token": "Close: that's the Secret's name. Submit the leaked value itself." },
+    flag: "EDERA{NSA_SECRETS_IN_LOGS}",
+    reward: [
+      "Anyone with `get` on `pods/log`, or access to your log platform, could read that token.",
+      "Never log configuration or environment values; rotate the credential and restrict `pods/log` access.",
+    ],
+  },
+  {
+    title: "Network · Cloud infrastructure",
     objective: "Find the ServiceAccount annotated to request permissions from an AWS IAM role.",
-    brief: ["Read up on cluster-to-cloud lateral movement: https://kubernetes-top10.owasp.org/2025/en/src/K08-Cluster-To-Cloud-Lateral-Movement.html", "Submit the ServiceAccount name."],
+    brief: [
+      `NSA/CISA guide, "Protecting sensitive cloud infrastructure": ${NSA_GUIDE}`,
+      "Read up on IAM roles for service accounts: https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html",
+      "Submit the ServiceAccount name.",
+    ],
     answers: ["analytics-batch", "customer-d/analytics-batch", "system:serviceaccount:customer-d:analytics-batch"],
     nudges: {
       "analytics-batch-d": "That's the pod. Submit the ServiceAccount it runs as.",
       "analyticsexportrole": "That's the IAM role. Which ServiceAccount requests it?",
       "arn:aws:iam::123456789012:role/analyticsexportrole": "That's the IAM role. Which ServiceAccount requests it?",
     },
-    flag: "EDERA{K08_CLOUD_LATERAL_MOVEMENT}",
-    reward: ["analytics-batch can trade its projected token for AnalyticsExportRole's AWS credentials.", "Compromise that pod and an attacker is in the cloud account, not just the cluster.", "Scope IAM roles per workload, avoid static keys, and block pod access to instance metadata."],
+    flag: "EDERA{NSA_CLOUD_IDENTITY}",
+    reward: [
+      "analytics-batch can trade its projected token for AnalyticsExportRole's AWS credentials.",
+      "Compromise that pod and an attacker is in the cloud account, not just the cluster.",
+      "Scope IAM roles per workload, avoid static keys, and block pod access to instance metadata.",
+    ],
+  },
+
+  /* ---- Authentication and authorization --------------------------------- */
+  {
+    title: "AuthN/AuthZ · Kubelet",
+    objective: "This node's kubelet hands out pod details to anyone who asks, over plain HTTP. Which port is it serving them on?",
+    brief: [
+      `NSA/CISA guide, "Authentication" (kubelet): ${NSA_GUIDE}`,
+      "Read up on kubelet authentication: https://kubernetes.io/docs/reference/access-authn-authz/kubelet-authn-authz/",
+      "Submit the port number.",
+    ],
+    answers: ["10255", "readonlyport: 10255", "http://10.10.0.12:10255"],
+    nudges: {
+      "10250": "That's the kubelet's authenticated HTTPS port, and it rejects anonymous callers. Look for another one.",
+      "readonlyport": "That's the setting. What is it set to?",
+    },
+    flag: "EDERA{NSA_KUBELET_READONLY}",
+    reward: [
+      "readOnlyPort: 10255 served /pods without authentication, including images, service accounts and the IAM role ARN.",
+      "Turning off anonymous auth on 10250 doesn't help if the read-only port is open beside it.",
+      "Set readOnlyPort: 0 and keep the kubelet's authentication and Webhook authorization on.",
+    ],
   },
   {
-    title: "K09 · Broken authentication mechanisms",
+    title: "AuthN/AuthZ · Anonymous access",
     objective: "Someone with no credentials at all can read more of this cluster than they should. Find the binding responsible.",
-    brief: ["Read up on broken authentication mechanisms: https://kubernetes-top10.owasp.org/2025/en/src/K09-Broken-Authentication-Mechanisms.html", "Submit the binding name."],
+    brief: [
+      `NSA/CISA guide, "Authentication": ${NSA_GUIDE}`,
+      "Read up on anonymous requests: https://kubernetes.io/docs/reference/access-authn-authz/authentication/#anonymous-requests",
+      "Submit the binding name.",
+    ],
     answers: ["cluster-status-public", "clusterrolebinding/cluster-status-public"],
     nudges: {
       "system:unauthenticated": "That's the group being granted access. Which binding grants it?",
@@ -462,14 +652,68 @@ const stages: Stage[] = [
       "cluster-status-reader": "That's the role. Which binding hands it to anonymous users?",
       "--anonymous-auth=false": "That's the fix. Which binding is the problem?",
       "anonymous-auth=false": "That's the fix. Which binding is the problem?",
+      "--anonymous-auth=true": "That's what lets anonymous requests in. Which binding then gives them something to read?",
     },
-    flag: "EDERA{K09_BROKEN_AUTHENTICATION}",
-    reward: ["cluster-status-public bound cluster-status-reader to system:unauthenticated.", "Anyone who could reach the API server could list every pod, node and namespace, with no credentials.", "Never grant RBAC to system:unauthenticated, and set --anonymous-auth=false where you can (test it first)."],
+    flag: "EDERA{NSA_ANONYMOUS_AUTH}",
+    reward: [
+      "cluster-status-public bound cluster-status-reader to system:unauthenticated.",
+      "Anyone who could reach the API server could list every pod, node and namespace, with no credentials.",
+      "Never grant RBAC to system:unauthenticated, and set --anonymous-auth=false where you can (test it first).",
+    ],
   },
   {
-    title: "K10 · Inadequate logging and monitoring",
+    title: "AuthN/AuthZ · Role-based access control",
+    objective: "Find the service account bound to excessive permissions.",
+    brief: [
+      `NSA/CISA guide, "Role-based access control": ${NSA_GUIDE}`,
+      "Read up on RBAC good practices: https://kubernetes.io/docs/concepts/security/rbac-good-practices/",
+      "Submit the affected service account.",
+    ],
+    answers: ["report-bot", "customer-b/report-bot", "system:serviceaccount:customer-b:report-bot"],
+    nudges: {
+      "report-bot-admin": "That's the binding. Which service account does it grant cluster-admin to?",
+      "cluster-admin": "That's the role. Who holds it that shouldn't?",
+      "report-bot-token": "That's its long-lived token. Submit the service account.",
+    },
+    flag: RBAC_FLAG,
+    reward: [
+      "report-bot-admin bound a reporting service account to cluster-admin, and its long-lived token Secret never expires.",
+      "RBAC should follow least privilege: a namespaced Role with only the verbs and resources it needs.",
+      "Avoid wildcard and cluster-wide grants, and prefer short-lived projected tokens to token Secrets.",
+    ],
+  },
+
+  /* ---- Audit logging and threat detection ------------------------------- */
+  {
+    title: "Audit · Audit policy",
+    objective: "The API server's audit policy has a blind spot. Which resource does it never record?",
+    brief: [
+      `NSA/CISA guide, "Kubernetes native audit logging configuration": ${NSA_GUIDE}`,
+      "Read up on audit policy: https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/#audit-policy",
+      "Submit the resource name.",
+    ],
+    answers: ["secrets", "secret"],
+    nudges: {
+      "none": "That's the level. Which resource gets it?",
+      "level: none": "That's the level. Which resource gets it?",
+      "system:kube-proxy": "That rule only drops kube-proxy's watches, which is normal noise. Look for one that hides a whole resource.",
+      "requestreceived": "Omitting that stage is normal. Look for a rule that drops a resource entirely.",
+    },
+    flag: "EDERA{NSA_AUDIT_POLICY}",
+    reward: [
+      "The first rule matched every Secret request at level None, so reads of Secrets were never logged.",
+      "Combined with report-bot's cluster-admin token, an attacker could read every Secret and leave no trace.",
+      "Log Secrets at Metadata level (never RequestResponse, which would log the values), and review rule order.",
+    ],
+  },
+  {
+    title: "Audit · Threat detection",
     objective: "Something suspicious ran on this node, and the alert never reached anyone. What process was it?",
-    brief: ["Read up on inadequate logging and monitoring: https://kubernetes-top10.owasp.org/2025/en/src/K10-Inadequate-Logging-And-Monitoring.html", "Submit the process name."],
+    brief: [
+      `NSA/CISA guide, "Alerting" and "Threat detection": ${NSA_GUIDE}`,
+      "Read up on logging architecture: https://kubernetes.io/docs/concepts/cluster-administration/logging/",
+      "Submit the process name.",
+    ],
     answers: ["kworkerd", "/tmp/.cache/kworkerd"],
     nudges: {
       "recommendation-c": "That's where it ran. What process did the monitor see?",
@@ -477,9 +721,39 @@ const stages: Stage[] = [
       "su": "That's how it got root. What did it run?",
       "/usr/bin/su": "That's how it got root. What did it run?",
     },
-    flag: "EDERA{K10_INSUFFICIENT_MONITORING}",
-    reward: ["The monitor caught /tmp/.cache/kworkerd running as root in recommendation-c.", "Its alert webhook returned 404, the alert was dropped, and nobody was told.", "Detection without delivery is no detection: alert on failed alerts, and test the path end to end."],
-  }
+    flag: "EDERA{NSA_THREAT_DETECTION}",
+    reward: [
+      "The monitor caught /tmp/.cache/kworkerd running as root in recommendation-c.",
+      "Its alert webhook returned 404, the alert was dropped, and nobody was told.",
+      "Detection without delivery is no detection: alert on failed alerts, and test the path end to end.",
+    ],
+  },
+
+  /* ---- Upgrading and application security practices --------------------- */
+  {
+    title: "Upgrades · Supported versions",
+    objective: "The API server tells anyone who asks which version it runs, no credentials needed. What exact version is it?",
+    brief: [
+      `NSA/CISA guide, "Upgrading and application security practices": ${NSA_GUIDE}`,
+      "Read up on the Kubernetes release cycle: https://kubernetes.io/releases/",
+      "Submit the exact version string.",
+    ],
+    answers: ["v1.30.2", "1.30.2"],
+    nudges: {
+      "v1.34.1": "That's your kubectl client's version. What does the API server report?",
+      "1.34.1": "That's your kubectl client's version. What does the API server report?",
+      "v1.31.4": "That's the kubelet on worker-02. What does the API server report?",
+      "1.31.4": "That's the kubelet on worker-02. What does the API server report?",
+      "1.30": "Close. Which exact patch release?",
+      "v1.30": "Close. Which exact patch release?",
+    },
+    flag: "EDERA{NSA_UPGRADES}",
+    reward: [
+      "/version answered an anonymous request with the exact build: v1.30.2.",
+      "1.30 is out of support, so that build will never get fixes, and an attacker can match it against known CVEs.",
+      "Stay on a supported minor release, apply patch releases promptly, and keep the API server off untrusted networks.",
+    ],
+  },
 ];
 
 interface GameState {
@@ -544,11 +818,13 @@ function securityProfileFor(pod: Pick<Pod, "name" | "allowPrivilegeEscalation">)
     seccompProfile: "RuntimeDefault" | "Localhost";
     automountServiceAccountToken: boolean;
   }> = {
-    "image-processor-a": { runAsNonRoot: true, runAsUser: 10001, readOnlyRootFilesystem: true, dropCapabilities: true, seccompProfile: "RuntimeDefault", automountServiceAccountToken: false },
+    /* NSA/CISA non-root finding: this one runs as UID 0 on a writable root filesystem. */
+    "image-processor-a": { runAsNonRoot: false, runAsUser: 0, readOnlyRootFilesystem: false, dropCapabilities: true, seccompProfile: "RuntimeDefault", automountServiceAccountToken: false },
     "billing-api-b": { runAsNonRoot: true, runAsUser: 10002, readOnlyRootFilesystem: true, dropCapabilities: true, seccompProfile: "RuntimeDefault", automountServiceAccountToken: false },
     "edera-ebpf-test": { runAsNonRoot: true, runAsUser: 10003, readOnlyRootFilesystem: false, dropCapabilities: true, seccompProfile: "RuntimeDefault", automountServiceAccountToken: false },
     "analytics-batch-d": { runAsNonRoot: true, runAsUser: 10004, readOnlyRootFilesystem: true, dropCapabilities: true, seccompProfile: "RuntimeDefault", automountServiceAccountToken: false },
     "recommendation-c": { runAsNonRoot: true, runAsUser: 10005, readOnlyRootFilesystem: true, dropCapabilities: true, seccompProfile: "RuntimeDefault", automountServiceAccountToken: false },
+    "metrics-exporter": { runAsNonRoot: true, runAsUser: 65534, readOnlyRootFilesystem: true, dropCapabilities: true, seccompProfile: "RuntimeDefault", automountServiceAccountToken: false },
     "gpu-workload": { runAsNonRoot: true, runAsUser: 10006, readOnlyRootFilesystem: false, dropCapabilities: true, seccompProfile: "RuntimeDefault", automountServiceAccountToken: false },
   };
   return {
@@ -674,6 +950,14 @@ const helpSections: HelpSection[] = [
       {
         command: "kubectl get networkpolicies [-A] [-o yaml]",
         description: "List NetworkPolicies and the pods they select.",
+      },
+      {
+        command: "kubectl get resourcequotas|limitranges [-A]",
+        description: "List per-namespace resource quotas and default limits.",
+      },
+      {
+        command: "kubectl top pods [-A] | kubectl top node",
+        description: "Show live CPU and memory usage.",
       },
       {
         command: "kubectl get nodes [-o wide] [--show-labels]",
@@ -803,6 +1087,11 @@ const helpSections: HelpSection[] = [
       { command: "env", description: "Display the simulated node environment." },
       { command: "ps", description: "List simulated running processes." },
       { command: "curl [-sk] <url>", description: "Make an HTTP request from the node." },
+      { command: "ss -tln", description: "List the ports this node is listening on." },
+      {
+        command: "etcdctl --endpoints=<url> get <key> [--prefix] [--keys-only]",
+        description: "Talk to an etcd cluster directly.",
+      },
       {
         command: "history",
         description: "Recall previously entered commands, or use ↑ / ↓.",
@@ -928,6 +1217,9 @@ const directories = new Set<string>([
   "/home",
   "/home/ivy",
   "/home/ivy/manifests",
+  "/home/ivy/notes",
+  "/home/ivy/backups",
+  "/home/ivy/backups/control-plane",
   "/home/ivy/.kube",
   "/proc",
   "/var",
@@ -945,7 +1237,7 @@ function manifestFor(pod: Pod): string {
     "metadata:",
     `  name: ${pod.name}`,
     `  namespace: ${pod.namespace}`,
-    "  annotations:",
+    ...(Object.keys(pod.annotations).length ? ["  annotations:"] : []),
     ...Object.entries(pod.annotations).map(
       ([key, value]) => `    ${key}: ${JSON.stringify(value)}`,
     ),
@@ -1016,7 +1308,7 @@ const virtualFiles: Record<string, string> = {
     "    clientCAFile: /etc/kubernetes/pki/ca.crt",
     "authorization:",
     "  mode: Webhook",
-    "readOnlyPort: 0",
+    "readOnlyPort: 10255",
     "cgroupDriver: systemd",
     "containerRuntimeEndpoint: unix:///run/containerd/containerd.sock",
   ].join("\n"),
@@ -1052,37 +1344,141 @@ const virtualFiles: Record<string, string> = {
     "Node audit notes",
     "----------------",
     "Manifests for everything scheduled here are in ./manifests.",
-    "OWASP Top 10:2025 evidence notes are in ./evidence.",
+    "My NSA/CISA hardening checklist is in ./notes.",
+    "Copies of the control-plane config, taken during OPS-2304, are in ./backups.",
     "",
     "kubectl and protect are both on PATH. The daemon socket is",
     "readable by this account, so protect talks to it directly.",
   ].join("\n"),
 };
 
+/*
+ * Audit notes and control-plane backups. These point the player at where to
+ * look for each NSA/CISA finding without naming the answer: the evidence is
+ * always in the cluster or in the config itself.
+ */
+const AUDIT_FILES: Record<string, string> = {
+  "/home/ivy/notes/nsa-cisa-checklist.md": [
+    "# worker-02 hardening review",
+    "Source: NSA/CISA Kubernetes Hardening Guide v1.2 (Aug 2022)",
+    "",
+    "## Pod security",
+    "- [ ] Containers run as non-root, with an immutable root filesystem",
+    "- [ ] No container allows privilege escalation",
+    "- [ ] Every workload actually runs sandboxed (don't trust labels, read the spec)",
+    "- [ ] Images scanned; nothing end-of-life left in the node's image cache",
+    "- [ ] Admission policy enforced for every tenant namespace",
+    "      (the guide's PodSecurityPolicy examples are gone since 1.25; we use Kyverno)",
+    "",
+    "## Network separation and hardening",
+    "- [ ] Default-deny plus scoped allows in every namespace. Test the selectors.",
+    "- [ ] Every tenant namespace has a ResourceQuota and a LimitRange",
+    "- [ ] etcd only reachable by the API server, over mutual TLS",
+    "- [ ] Secrets encrypted at rest. Check the EncryptionConfiguration, not just that it exists.",
+    "- [ ] No credentials in pod logs",
+    "- [ ] Workload cloud identities scoped and reviewed",
+    "",
+    "## Authentication and authorization",
+    "- [ ] kubelet: anonymous auth off, Webhook authz, no unauthenticated ports",
+    "- [ ] Nothing bound to system:unauthenticated",
+    "- [ ] No service account holds more than it needs",
+    "",
+    "## Audit logging and threat detection",
+    "- [ ] Audit policy covers sensitive resources. Rules are first-match!",
+    "- [ ] Runtime alerts actually reach someone",
+    "",
+    "## Upgrades",
+    "- [ ] Control plane on a supported minor release",
+  ].join("\n"),
 
+  "/home/ivy/.bash_history": [
+    "kubectl get pods -A",
+    "protect zone list",
+    "cat /etc/edera/cri.toml",
+    "kubectl get resourcequota -A",
+    "cp /etc/kubernetes/manifests/kube-apiserver.yaml ~/backups/control-plane/   # on cp-01, OPS-2304",
+    "etcdctl --endpoints=http://10.10.0.10:2379 endpoint health",
+    "etcdctl --endpoints=http://10.10.0.10:2379 get /registry/secrets --prefix --keys-only",
+    "ss -tln",
+    "cat /var/lib/kubelet/config.yaml",
+  ].join("\n"),
 
-/* OWASP Top 10:2025 scenario manifests and evidence notes (synthetic lab data). */
-const OWASP_SCENARIO_FILES: Record<string, string> = {
-  "/home/ivy/manifests/rbac-audit.yaml": "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: report-bot-admin\nsubjects:\n  - kind: ServiceAccount\n    name: report-bot\n    namespace: customer-b\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n  name: cluster-admin\n",
-  "/home/ivy/manifests/billing-api.yaml": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: billing-api-audit\n  namespace: customer-b\nspec:\n  containers:\n    - name: billing-api\n      image: ghcr.io/acme/billing-api:3.0.1\n      env:\n        - name: BILLING_TOKEN\n          valueFrom:\n            secretKeyRef:\n              name: billing-api-token\n              key: token\n",
-  "/home/ivy/manifests/policy-audit.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: admission-policy-audit\n  namespace: kube-system\ndata:\n  expected-policy: restricted-workloads\n  status: missing\n",
-  "/home/ivy/manifests/network-audit.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: network-policy-audit\n  namespace: customer-b\ndata:\n  namespace: customer-b\n  finding: no-default-deny-ingress\n",
-  "/home/ivy/manifests/component-exposure.yaml": "apiVersion: v1\nkind: Service\nmetadata:\n  name: metrics-dashboard\n  namespace: platform\nspec:\n  type: LoadBalancer\n  ports:\n    - port: 9090\n      targetPort: 9090\n",
-  "/home/ivy/manifests/vulnerable-component.yaml": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: legacy-metrics\n  namespace: platform\nspec:\n  containers:\n    - name: metrics\n      image: example.invalid/legacy-metrics:latest\n",
-  "/home/ivy/manifests/cloud-identity.yaml": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: invoice-exporter\n  namespace: customer-b\nspec:\n  containers:\n    - name: exporter\n      image: ghcr.io/acme/invoice-exporter:1.0.0\n      env:\n        - name: CLOUD_METADATA_ACCESS\n          value: \"enabled\"\n",
-  "/home/ivy/manifests/authentication-audit.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: legacy-auth-proxy\n  namespace: platform\ndata:\n  allowUnauthenticatedHealthAndAdmin: \"true\"\n",
-  "/home/ivy/manifests/audit-policy.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: audit-policy\n  namespace: kube-system\ndata:\n  omitted-resources: \"secrets\"\n  omitted-levels: \"RequestResponse\"\n",
-  "/home/ivy/evidence/rbac-review.txt": "RBAC review \u2014 customer-b\nFinding: RoleBinding report-bot-admin binds ServiceAccount report-bot to ClusterRole cluster-admin.\nExpected answer: report-bot\nRemediation: replace with a namespace-scoped Role containing only required verbs and resources.\n",
-  "/home/ivy/evidence/secret-review.txt": "Secret review \u2014 billing-api\nFinding: the workload manifest references BILLING_TOKEN from Secret billing-api-token; lab evidence confirms it was copied into an environment dump.\nExpected answer: billing-api-token\nRemediation: rotate the lab credential and restrict Secret read access.\n",
-  "/home/ivy/evidence/policy-review.txt": "Admission policy review\nFinding: the Restricted Pod Security baseline is documented but no enforcing admission policy named restricted-workloads is active.\nExpected answer: restricted-workloads\n",
-  "/home/ivy/evidence/network-review.txt": "Network review\nFinding: namespace customer-b has no default-deny ingress policy and billing-api accepts connections from every namespace.\nExpected answer: customer-b\n",
-  "/home/ivy/evidence/component-review.txt": "Exposure review\nFinding: metrics-dashboard is exposed through a public LoadBalancer service without an authentication gateway.\nExpected answer: metrics-dashboard\n",
-  "/home/ivy/evidence/cloud-review.txt": "Cloud identity review\nFinding: invoice-exporter can reach the simulated cloud metadata endpoint and is assigned a broad export role.\nExpected answer: invoice-exporter\nAll cloud endpoints in this lab are simulated; no real cloud credentials exist.\n",
-  "/home/ivy/evidence/auth-review.txt": "Authentication review\nFinding: legacy-auth-proxy enables allowUnauthenticatedHealthAndAdmin=true; the simulated admin route shares this bypass.\nExpected answer: legacy-auth-proxy\nRemediation: remove the bypass and validate issuer, audience, expiry, and signature.\n",
-  "/home/ivy/evidence/audit-review.txt": "Audit review\nFinding: the policy omits secrets metadata and response-level events, leaving Secret reads difficult to investigate.\nExpected answer: secrets-metadata-and-response\n",
+  "/home/ivy/backups/control-plane/kube-apiserver.yaml": [
+    "apiVersion: v1",
+    "kind: Pod",
+    "metadata:",
+    "  name: kube-apiserver",
+    "  namespace: kube-system",
+    "spec:",
+    "  containers:",
+    "  - name: kube-apiserver",
+    "    image: registry.k8s.io/kube-apiserver@sha256:3f2c7e9d41b8a06c5de1f7a2b94c08e6d3a1f5b72c9e04d8a6b13f7e2c590d4a",
+    "    command:",
+    "    - kube-apiserver",
+    "    - --advertise-address=10.10.0.10",
+    "    - --secure-port=6443",
+    "    - --anonymous-auth=true",
+    "    - --authorization-mode=Node,RBAC",
+    "    - --enable-admission-plugins=NodeRestriction",
+    "    - --client-ca-file=/etc/kubernetes/pki/ca.crt",
+    "    - --tls-cert-file=/etc/kubernetes/pki/apiserver.crt",
+    "    - --tls-private-key-file=/etc/kubernetes/pki/apiserver.key",
+    "    - --kubelet-client-certificate=/etc/kubernetes/pki/apiserver-kubelet-client.crt",
+    "    - --kubelet-client-key=/etc/kubernetes/pki/apiserver-kubelet-client.key",
+    "    # OPS-2304: etcd TLS disabled while the etcd certs were rotated. Re-enable after.",
+    "    - --etcd-servers=http://10.10.0.10:2379",
+    "    - --encryption-provider-config=/etc/kubernetes/enc/encryption-config.yaml",
+    "    - --audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml",
+    "    - --audit-log-path=/var/log/kubernetes/audit/audit.log",
+    "    - --audit-log-maxage=30",
+    "    - --profiling=false",
+    "    - --service-account-issuer=https://kubernetes.default.svc.cluster.local",
+    "    - --service-account-key-file=/etc/kubernetes/pki/sa.pub",
+    "    - --service-account-signing-key-file=/etc/kubernetes/pki/sa.key",
+  ].join("\n"),
+
+  "/home/ivy/backups/control-plane/encryption-config.yaml": [
+    "apiVersion: apiserver.config.k8s.io/v1",
+    "kind: EncryptionConfiguration",
+    "resources:",
+    "  - resources:",
+    "      - secrets",
+    "    providers:",
+    "      # OPS-2304: moved identity up so the API server could still read",
+    "      # Secrets during the key rotation. Swap back afterwards.",
+    "      - identity: {}",
+    "      - aescbc:",
+    "          keys:",
+    "            - name: key1",
+    "              secret: bGFiLW9ubHktbm90LWEtcmVhbC1rZXktMzJieXRlcyE=",
+  ].join("\n"),
+
+  "/home/ivy/backups/control-plane/audit-policy.yaml": [
+    "apiVersion: audit.k8s.io/v1",
+    "kind: Policy",
+    "omitStages:",
+    "  - RequestReceived",
+    "rules:",
+    "  # OPS-2187: Secret reads were flooding the SIEM.",
+    "  - level: None",
+    "    resources:",
+    '      - group: ""',
+    '        resources: ["secrets"]',
+    "  - level: None",
+    '    users: ["system:kube-proxy"]',
+    '    verbs: ["watch"]',
+    "  - level: Metadata",
+    "    resources:",
+    '      - group: ""',
+    '        resources: ["configmaps"]',
+    "  - level: RequestResponse",
+    "    resources:",
+    '      - group: "rbac.authorization.k8s.io"',
+    "  - level: Metadata",
+  ].join("\n"),
 };
-Object.assign(virtualFiles, OWASP_SCENARIO_FILES);
-for (const path of Object.keys(OWASP_SCENARIO_FILES)) directories.add(path.slice(0, path.lastIndexOf("/")));
+Object.assign(virtualFiles, AUDIT_FILES);
+for (const path of Object.keys(AUDIT_FILES)) directories.add(path.slice(0, path.lastIndexOf("/")));
 
 /* Each workload's manifest, as applied. */
 for (const pod of pods) {
@@ -1320,6 +1716,8 @@ function kubectlUsage(): string {
     "  kubectl get clusterpolicies [-o yaml]",
     "  kubectl get deployments|events [-n <namespace>] [-A]",
     "  kubectl get networkpolicies [-A] [-o yaml]",
+    "  kubectl get resourcequotas|limitranges [-A] [-o yaml]",
+    "  kubectl top pods [-A] | kubectl top node",
     "  kubectl get runtimeclass",
     "  kubectl get serviceaccounts|secrets [-A] [-o yaml]",
     "  kubectl get clusterroles|clusterrolebindings [-o wide|yaml]",
@@ -1380,6 +1778,7 @@ const POD_IPS: Record<string, string> = {
   "edera-ebpf-test": "10.244.1.23",
   "analytics-batch-d": "10.244.1.24",
   "recommendation-c": "10.244.1.25",
+  "metrics-exporter": "10.244.1.28",
   "gpu-workload": "10.244.1.26",
   "payments-worker-6d8f7b9c4-x2k9q": "10.244.1.27",
 };
@@ -1454,6 +1853,7 @@ function describePodDetails(pod: Pod): string {
     `    Privileged:  ${pod.privileged}`,
     `    AllowPrivilegeEscalation: ${securityProfileFor(pod).allowPrivilegeEscalation}`,
     `    RunAsNonRoot: ${securityProfileFor(pod).runAsNonRoot}`,
+    `    RunAsUser:   ${securityProfileFor(pod).runAsUser}`,
     `    ReadOnlyRootFilesystem: ${securityProfileFor(pod).readOnlyRootFilesystem}`,
     `    SeccompProfile: ${securityProfileFor(pod).seccompProfile}`,
     "",
@@ -1502,7 +1902,7 @@ function getPodYaml(name: string | undefined, flags: KubectlFlags): string {
     ...Object.entries(labelsFor(pod)).map(
       ([key, value]) => `    ${key}: ${JSON.stringify(value)}`,
     ),
-    "  annotations:",
+    ...(Object.keys(pod.annotations).length ? ["  annotations:"] : []),
     ...Object.entries(pod.annotations).map(
       ([key, value]) => `    ${key}: ${JSON.stringify(value)}`,
     ),
@@ -1667,7 +2067,9 @@ function kubectlExec(
     `Linux version ${NODE.kernelVersion} (build@${NODE.name})`,
     "",
     `That is the node's own kernel. ${pod.name} did not boot one.`,
-    "It is sharing the host kernel, with privileged set to true.",
+    pod.privileged
+      ? "It is sharing the host kernel, with privileged set to true."
+      : "It has no runtimeClassName, so it fell back to runc and shares the host kernel.",
   ].join("\n");
 }
 
@@ -1996,7 +2398,7 @@ function kubectlManifestAction(action: ManifestAction): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* RBAC, service accounts and secrets (K02)                                   */
+/* RBAC, service accounts and secrets (RBAC stage)                            */
 /*                                                                            */
 /* Read-only views of the cluster's identity and authorization objects. One   */
 /* service account is bound to cluster-admin; finding it means connecting a   */
@@ -2857,7 +3259,7 @@ function kubectlRbac(verb: string, resource: string, name: string | undefined, f
 }
 
 /* -------------------------------------------------------------------------- */
-/* kubectl logs (K03)                                                         */
+/* kubectl logs (secrets-in-logs stage)                                      */
 /*                                                                            */
 /* billing-api dumps its environment at startup. Its redaction filter only    */
 /* matches names containing PASSWORD, so BILLING_TOKEN is logged in plain     */
@@ -2866,7 +3268,7 @@ function kubectlRbac(verb: string, resource: string, name: string | undefined, f
 
 const podLogs: Record<string, string[]> = {
   "image-processor-a": [
-    "2026-11-08T08:12:41.204Z INFO  image-processor 1.4.2 starting",
+    "2026-11-08T08:12:41.204Z INFO  image-processor 1.4.2 starting (uid=0 gid=0)",
     "2026-11-08T08:12:41.209Z INFO  config: REGISTRY=registry.customer-a.internal REGISTRY_AUTH=[REDACTED]",
     "2026-11-08T08:12:41.377Z INFO  worker pool started (4 workers)",
     "2026-11-08T08:13:02.018Z INFO  processed thumbnail batch 1182 (64 images, 2.1s)",
@@ -2932,6 +3334,12 @@ const podLogs: Record<string, string[]> = {
     "2026-11-08T08:19:20.004Z WARN  GET /v1/recommendations?user=4410 200 1,884ms",
     "2026-11-08T08:19:51.337Z WARN  event loop lag 3,105ms (cpu throttled)",
   ],
+  "metrics-exporter": [
+    "ts=2026-11-08T08:09:12.001Z level=info msg=\"Starting metrics-exporter\" version=0.4.1",
+    "ts=2026-11-08T08:09:12.003Z level=info msg=\"Listening on\" address=[::]:9100",
+    "ts=2026-11-08T08:09:12.010Z level=info msg=\"Enabled collectors\" collectors=cpu,meminfo,filesystem,netdev",
+    "ts=2026-11-08T08:09:44.512Z level=info msg=\"scrape ok\" duration_ms=14",
+  ],
   "gpu-workload": [
     "==========",
     "== CUDA ==",
@@ -2972,7 +3380,7 @@ function kubectlLogs(head: string[], target: string | undefined, flags: KubectlF
 }
 
 /* -------------------------------------------------------------------------- */
-/* Namespaces, Kyverno ClusterPolicy and the blocked tenant (K04)             */
+/* Namespaces, Kyverno ClusterPolicy and the blocked tenant (admission)      */
 /*                                                                            */
 /* A Kyverno ClusterPolicy in Enforce mode denies Pods in any namespace that  */
 /* has not been onboarded with edera.dev/isolation=enforced. customer-e was    */
@@ -3099,6 +3507,21 @@ function getNamespaces(name: string | undefined, flags: KubectlFlags): string {
   return table(headers, rows);
 }
 
+/* The Resource Quotas and Resource Limits sections of `kubectl describe ns`. */
+function namespaceQuotaLines(namespace: string): string[] {
+  const quotas = resourceQuotas.filter((quota) => quota.namespace === namespace);
+  const ranges = limitRanges.filter((range) => range.namespace === namespace);
+  return [
+    ...(quotas.length
+      ? ["Resource Quotas", ...quotas.flatMap((quota) => quotaBlock(quota, "  "))]
+      : ["No resource quota."]),
+    "",
+    ...(ranges.length
+      ? ["Resource Limits", ...ranges.map((range) => limitRangeRows(range, " "))]
+      : ["No LimitRange resource."]),
+  ];
+}
+
 function describeNamespace(name: string | undefined): string {
   const names = name ? [name] : namespaceNames();
   if (name && !namespaceNames().includes(name)) return notFound("namespaces", name);
@@ -3112,9 +3535,7 @@ function describeNamespace(name: string | undefined): string {
         "Annotations:  <none>",
         "Status:       Active",
         "",
-        "No resource quota.",
-        "",
-        "No LimitRange resource.",
+        ...namespaceQuotaLines(namespace),
       ].join("\n"),
     )
     .join("\n\n\n");
@@ -3180,7 +3601,7 @@ function kubectlLabel(positional: string[], head: string[]): string {
       `replicaset/${PAYMENTS.replicaSet} retried and created pod/${pod.name}: Running in ${pod.zone}.`,
     );
 
-    if (currentStage()?.flag === K04_FLAG) {
+    if (currentStage()?.flag === ADMISSION_FLAG) {
       output.push("", captureCurrentStage());
     }
   }
@@ -3415,7 +3836,7 @@ function getEvents(flags: KubectlFlags): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* NetworkPolicies (K05)                                                      */
+/* NetworkPolicies (network policy stage)                                    */
 /*                                                                            */
 /* Every tenant has a default-deny plus scoped allows, except customer-b,     */
 /* which relies on one policy for billing-api. Its podSelector says           */
@@ -3583,7 +4004,7 @@ function describeNetworkPolicy(policy: NetworkPolicyObject): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* API server exposure (K06)                                                  */
+/* API server exposure (anonymous access and upgrades stages)                */
 /*                                                                            */
 /* As in a default cluster, the API server answers /version, /healthz,       */
 /* /livez and /readyz for anonymous callers (system:public-info-viewer), and  */
@@ -3701,6 +4122,434 @@ function anonymousList(resource: string, namespace: string | undefined, name: st
   return { kind: "Status", status: "Failure", reason: "NotFound", code: 404 };
 }
 
+/* -------------------------------------------------------------------------- */
+/* Resource policies (resource policies stage)                                */
+/*                                                                            */
+/* Every tenant namespace has a ResourceQuota and a LimitRange except         */
+/* customer-c. recommendation-c, which runs there, is pinned at its zone's    */
+/* CPU ceiling: `kubectl top` and its own logs show it.                       */
+/* -------------------------------------------------------------------------- */
+
+interface ResourceQuotaObject {
+  name: string;
+  namespace: string;
+  hard: Record<string, string>;
+  age: string;
+}
+
+interface LimitRangeObject {
+  name: string;
+  namespace: string;
+  max: { cpu: string; memory: string };
+  defaultRequest: { cpu: string; memory: string };
+  defaultLimit: { cpu: string; memory: string };
+  age: string;
+}
+
+const QUOTA_NAMESPACES = ["default", "customer-a", "customer-b", "customer-d", "customer-e", "platform"];
+
+const resourceQuotas: ResourceQuotaObject[] = QUOTA_NAMESPACES.map((namespace) => ({
+  name: "tenant-quota",
+  namespace,
+  hard: {
+    pods: namespace === "platform" ? "20" : "10",
+    "requests.cpu": namespace === "default" || namespace === "customer-d" ? "8" : "4",
+    "requests.memory": namespace === "default" || namespace === "customer-d" ? "16Gi" : "8Gi",
+    "limits.cpu": namespace === "default" || namespace === "customer-d" ? "16" : "8",
+    "limits.memory": namespace === "default" || namespace === "customer-d" ? "32Gi" : "16Gi",
+  },
+  age: namespace === "customer-e" ? "2d" : "41d",
+}));
+
+const limitRanges: LimitRangeObject[] = QUOTA_NAMESPACES.map((namespace) => ({
+  name: "tenant-defaults",
+  namespace,
+  max: { cpu: "4", memory: "8Gi" },
+  defaultRequest: { cpu: "250m", memory: "256Mi" },
+  defaultLimit: { cpu: "1", memory: "1Gi" },
+  age: namespace === "customer-e" ? "2d" : "41d",
+}));
+
+/* Live usage, as metrics-server would report it. */
+const POD_USAGE: Record<string, { cpu: string; memory: string }> = {
+  "image-processor-a": { cpu: "212m", memory: "388Mi" },
+  "billing-api-b": { cpu: "38m", memory: "142Mi" },
+  "edera-ebpf-test": { cpu: "96m", memory: "201Mi" },
+  "analytics-batch-d": { cpu: "11m", memory: "96Mi" },
+  "recommendation-c": { cpu: "1994m", memory: "1712Mi" },
+  "metrics-exporter": { cpu: "7m", memory: "24Mi" },
+  "gpu-workload": { cpu: "640m", memory: "2210Mi" },
+  "payments-worker-6d8f7b9c4-x2k9q": { cpu: "4m", memory: "61Mi" },
+};
+
+function quotaUsed(quota: ResourceQuotaObject): Record<string, string> {
+  const running = pods.filter((pod) => pod.namespace === quota.namespace);
+  const millis = running.length * 250;
+  const mebibytes = running.length * 256;
+  const cpu = millis % 1000 === 0 ? String(millis / 1000) : `${millis}m`;
+  return {
+    pods: String(running.length),
+    "requests.cpu": cpu,
+    "requests.memory": `${mebibytes}Mi`,
+    "limits.cpu": String(running.length),
+    "limits.memory": `${running.length}Gi`,
+  };
+}
+
+function quotaPairs(quota: ResourceQuotaObject, prefix: "requests" | "limits"): string {
+  const used = quotaUsed(quota);
+  return Object.keys(quota.hard)
+    .filter((key) => (prefix === "requests" ? !key.startsWith("limits.") : key.startsWith("limits.")))
+    .map((key) => `${key}: ${used[key]}/${quota.hard[key]}`)
+    .join(", ");
+}
+
+function getResourceQuotas(name: string | undefined, flags: KubectlFlags): string {
+  const scoped = inScope(resourceQuotas, flags);
+  const visible = name ? scoped.filter((quota) => quota.name === name) : scoped;
+
+  if (name && visible.length === 0) return notFound("resourcequotas", name);
+  if (visible.length === 0) return noneFound(flags, true);
+
+  if (flags.yaml) {
+    return yamlDocument(
+      visible.map((quota) => ({
+        apiVersion: "v1",
+        kind: "ResourceQuota",
+        metadata: { name: quota.name, namespace: quota.namespace },
+        spec: { hard: quota.hard },
+        status: { hard: quota.hard, used: quotaUsed(quota) },
+      })),
+      Boolean(name),
+    );
+  }
+
+  return withNamespaceColumn(
+    ["NAME", "AGE", "REQUEST", "LIMIT"],
+    visible.map((quota) => [quota.name, quota.age, quotaPairs(quota, "requests"), quotaPairs(quota, "limits")]),
+    visible,
+    flags,
+  );
+}
+
+function quotaBlock(quota: ResourceQuotaObject, indent: string): string[] {
+  const used = quotaUsed(quota);
+  return [
+    `${indent}Name:            ${quota.name}`,
+    table(
+      [`${indent}Resource`, "Used", "Hard"],
+      [
+        [`${indent}--------`, "----", "----"],
+        ...Object.keys(quota.hard).map((key) => [`${indent}${key}`, used[key], quota.hard[key]]),
+      ],
+    ),
+  ];
+}
+
+function describeResourceQuota(quota: ResourceQuotaObject): string {
+  return [`Namespace:       ${quota.namespace}`, ...quotaBlock(quota, "")].join("\n");
+}
+
+function limitRangeRows(range: LimitRangeObject, indent: string): string {
+  return table(
+    [`${indent}Type`, "Resource", "Min", "Max", "Default Request", "Default Limit", "Max Limit/Request Ratio"],
+    [
+      [`${indent}----`, "--------", "---", "---", "---------------", "-------------", "-----------------------"],
+      [`${indent}Container`, "cpu", "-", range.max.cpu, range.defaultRequest.cpu, range.defaultLimit.cpu, "-"],
+      [`${indent}Container`, "memory", "-", range.max.memory, range.defaultRequest.memory, range.defaultLimit.memory, "-"],
+    ],
+  );
+}
+
+function getLimitRanges(name: string | undefined, flags: KubectlFlags): string {
+  const scoped = inScope(limitRanges, flags);
+  const visible = name ? scoped.filter((range) => range.name === name) : scoped;
+
+  if (name && visible.length === 0) return notFound("limitranges", name);
+  if (visible.length === 0) return noneFound(flags, true);
+
+  if (flags.yaml) {
+    return yamlDocument(
+      visible.map((range) => ({
+        apiVersion: "v1",
+        kind: "LimitRange",
+        metadata: { name: range.name, namespace: range.namespace },
+        spec: {
+          limits: [{ type: "Container", max: range.max, defaultRequest: range.defaultRequest, default: range.defaultLimit }],
+        },
+      })),
+      Boolean(name),
+    );
+  }
+
+  return withNamespaceColumn(
+    ["NAME", "CREATED AT"],
+    visible.map((range) => [range.name, range.age === "2d" ? "2026-11-06T15:58:40Z" : "2026-09-28T09:20:11Z"]),
+    visible,
+    flags,
+  );
+}
+
+function describeLimitRange(range: LimitRangeObject): string {
+  return [`Name:       ${range.name}`, `Namespace:  ${range.namespace}`, limitRangeRows(range, "")].join("\n");
+}
+
+function kubectlTop(resource: string | undefined, flags: KubectlFlags): string {
+  if (["node", "nodes", "no"].includes(resource ?? "")) {
+    return table(
+      ["NAME", "CPU(cores)", "CPU(%)", "MEMORY(bytes)", "MEMORY(%)"],
+      [[NODE.name, "3712m", "46%", "9418Mi", "65%"]],
+    );
+  }
+
+  if (!["pod", "pods", "po"].includes(resource ?? "")) {
+    return 'error: unknown command "top". Try: kubectl top pods [-A] or kubectl top node';
+  }
+
+  const visible = scopedPods(flags);
+  if (visible.length === 0) return noneFound(flags, true);
+
+  const headers = ["NAME", "CPU(cores)", "MEMORY(bytes)"];
+  const rows = visible.map((pod) => {
+    const usage = POD_USAGE[pod.name] ?? { cpu: "1m", memory: "16Mi" };
+    return [pod.name, usage.cpu, usage.memory];
+  });
+
+  return withNamespaceColumn(headers, rows, visible, flags);
+}
+
+/* -------------------------------------------------------------------------- */
+/* etcd (control plane and secrets-at-rest stages)                            */
+/*                                                                            */
+/* During OPS-2304 someone turned off etcd's TLS and never turned it back on, */
+/* so the cluster datastore answers plain HTTP on 10.10.0.10:2379 to anyone   */
+/* who can reach it. The same change put the identity provider first in the   */
+/* EncryptionConfiguration, so Secrets come back out of etcd in plaintext.   */
+/* -------------------------------------------------------------------------- */
+
+const ETCD = { host: API_SERVER.host, port: 2379, version: "3.5.12", member: "8e9e05c52164694d" };
+
+function etcdKeys(): string[] {
+  return [
+    ...namespaceNames().map((namespace) => `/registry/namespaces/${namespace}`),
+    ...pods.map((pod) => `/registry/pods/${pod.namespace}/${pod.name}`),
+    ...secrets.map((secret) => `/registry/secrets/${secret.namespace}/${secret.name}`),
+    ...serviceAccounts.map((account) => `/registry/serviceaccounts/${account.namespace}/${account.name}`),
+    ...clusterRoleBindings.map((binding) => `/registry/clusterrolebindings/${binding.name}`),
+  ].sort();
+}
+
+/*
+ * How etcdctl prints a stored object. Kubernetes writes protobuf behind a
+ * "k8s\0" magic prefix; with the identity provider there is no
+ * "k8s:enc:aescbc:v1:" envelope, so the Secret's values are right there.
+ */
+function etcdValue(key: string): string {
+  const junk = "�";
+  const secret = secrets.find((candidate) => key === `/registry/secrets/${candidate.namespace}/${candidate.name}`);
+
+  if (secret) {
+    return [
+      `k8s${junk}`,
+      `${junk}${junk}v1${junk}Secret${junk}`,
+      `${junk}${secret.name}${junk}${secret.namespace}${junk}`,
+      ...Object.entries(secret.data).map(([dataKey, value]) => `${junk}${dataKey}${junk}${value.split("\n")[0]}`),
+      `${junk}${secret.type}${junk}`,
+    ].join("\n");
+  }
+
+  const kind = key.split("/")[2] ?? "object";
+  return `k8s${junk}\n${junk}${junk}v1${junk}${kind}${junk} (protobuf, ${180 + key.length * 7} bytes)`;
+}
+
+function etcdEndpoint(tokens: string[]): string {
+  const inline = tokens.find((token) => token.startsWith("--endpoints="));
+  const index = tokens.indexOf("--endpoints");
+  const value = inline ? inline.slice("--endpoints=".length) : index !== -1 ? tokens[index + 1] : undefined;
+  return (value ?? "127.0.0.1:2379").split(",")[0].replace(/^['"]|['"]$/g, "");
+}
+
+function etcdctl(raw: string): string {
+  const tokens = raw.split(/\s+/).slice(1);
+  const positional = tokens.filter(
+    (token, index) =>
+      !token.startsWith("-") &&
+      !["--endpoints", "--cacert", "--cert", "--key", "--user", "-w", "--write-out"].includes(tokens[index - 1] ?? ""),
+  );
+  const [command, subcommand] = positional;
+
+  const usage = [
+    "usage: etcdctl --endpoints=<scheme://host:port> <command>",
+    "",
+    "  etcdctl version",
+    "  etcdctl --endpoints=<endpoint> endpoint health",
+    "  etcdctl --endpoints=<endpoint> member list",
+    "  etcdctl --endpoints=<endpoint> get <key> [--prefix] [--keys-only]",
+  ].join("\n");
+
+  if (!command) return usage;
+  if (command === "version") return `etcdctl version: ${ETCD.version}\nAPI version: 3.5`;
+
+  const endpoint = etcdEndpoint(tokens);
+  const match = /^(?:(https?):\/\/)?([^/:]+)(?::(\d+))?\/?$/.exec(endpoint);
+  const scheme = match?.[1] ?? "http";
+  const host = match?.[2];
+  const port = Number(match?.[3] ?? 2379);
+  const reachable = host === ETCD.host && port === ETCD.port;
+
+  if (!reachable) {
+    return [
+      `{"level":"warn","msg":"retrying of unary invoker failed","target":"etcd-endpoints://${endpoint}","error":"rpc error: code = DeadlineExceeded desc = latest balancer error: last connection error: connection error: desc = \\"transport: Error while dialing: dial tcp ${host ?? endpoint}:${port}: connect: connection refused\\""}`,
+      "Error: context deadline exceeded",
+      ...(host === "127.0.0.1" || host === "localhost"
+        ? ["", "etcd doesn't run on worker nodes. Where does the API server keep its data?"]
+        : []),
+    ].join("\n");
+  }
+
+  if (scheme === "https") {
+    return [
+      `{"level":"warn","msg":"retrying of unary invoker failed","target":"etcd-endpoints://${endpoint}","error":"rpc error: code = Unavailable desc = connection error: desc = \\"transport: authentication handshake failed: tls: first record does not look like a TLS handshake\\""}`,
+      "Error: context deadline exceeded",
+    ].join("\n");
+  }
+
+  const url = `http://${ETCD.host}:${ETCD.port}`;
+
+  if (command === "endpoint" && subcommand === "health") {
+    return `${url} is healthy: successfully committed proposal: took = 2.318ms`;
+  }
+
+  if (command === "member" && subcommand === "list") {
+    return `${ETCD.member}, started, cp-01, http://${ETCD.host}:2380, ${url}, false`;
+  }
+
+  if (command === "get") {
+    const key = subcommand;
+    if (!key) return 'Error: get command needs one argument as key and an optional argument as range_end';
+
+    const prefix = tokens.includes("--prefix");
+    const keysOnly = tokens.includes("--keys-only");
+    const keys = etcdKeys().filter((candidate) => (prefix ? candidate.startsWith(key) : candidate === key));
+
+    if (keys.length === 0) return "";
+
+    return keys
+      .map((candidate) => (keysOnly ? `${candidate}\n` : `${candidate}\n${etcdValue(candidate)}`))
+      .join("\n");
+  }
+
+  return [`Error: unknown command "${command}" for "etcdctl"`, "", usage].join("\n");
+}
+
+/* What etcd's plain-HTTP listener returns to curl. */
+function etcdHttp(path: string): { status: number; body: string } {
+  const clean = path.split("?")[0].replace(/\/+$/, "") || "/";
+  if (clean === "/version") {
+    return { status: 200, body: JSON.stringify({ etcdserver: ETCD.version, etcdcluster: "3.5.0" }) };
+  }
+  if (clean === "/health") return { status: 200, body: JSON.stringify({ health: "true", reason: "" }) };
+  if (clean === "/metrics") {
+    return {
+      status: 200,
+      body: [
+        "# HELP etcd_server_has_leader Whether or not a leader exists. 1 is existence, 0 is not.",
+        "# TYPE etcd_server_has_leader gauge",
+        "etcd_server_has_leader 1",
+        `etcd_debugging_mvcc_keys_total ${etcdKeys().length}`,
+        `etcd_server_version{server_version="${ETCD.version}"} 1`,
+      ].join("\n"),
+    };
+  }
+  return { status: 404, body: "404 page not found" };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Kubelet read-only port (kubelet stage)                                     */
+/*                                                                            */
+/* The authenticated port, 10250, correctly rejects anonymous callers. But    */
+/* /var/lib/kubelet/config.yaml also sets readOnlyPort: 10255, which serves   */
+/* pod specs over plain HTTP with no authentication at all.                   */
+/* -------------------------------------------------------------------------- */
+
+const KUBELET_READ_ONLY_PORT = 10255;
+
+function kubeletReadOnly(path: string): { status: number; body: string } {
+  const clean = path.split("?")[0].replace(/\/+$/, "") || "/";
+
+  if (clean === "/healthz") return { status: 200, body: "ok" };
+
+  if (clean === "/pods") {
+    return {
+      status: 200,
+      body: JSON.stringify(
+        {
+          kind: "PodList",
+          apiVersion: "v1",
+          metadata: {},
+          items: pods.map((pod) => ({
+            metadata: { name: pod.name, namespace: pod.namespace, labels: labelsFor(pod), annotations: pod.annotations },
+            spec: {
+              nodeName: pod.node,
+              runtimeClassName: pod.runtimeClass ?? undefined,
+              serviceAccountName: serviceAccountFor(pod)?.name ?? "default",
+              containers: [
+                {
+                  name: pod.app,
+                  image: pod.image,
+                  env: Object.entries(awsIdentityEnv(pod)).map(([name, value]) => ({ name, value })),
+                },
+              ],
+            },
+            status: { phase: pod.status, podIP: podIp(pod) },
+          })),
+        },
+        null,
+        2,
+      ),
+    };
+  }
+
+  if (clean === "/spec") {
+    return {
+      status: 200,
+      body: JSON.stringify({ num_cores: 8, cpu_frequency_khz: 2900000, memory_capacity: 17179869184, machine_id: "lab-only" }, null, 2),
+    };
+  }
+
+  if (clean === "/metrics") {
+    return {
+      status: 200,
+      body: [
+        "# HELP kubelet_running_pods [ALPHA] Number of pods that have a running pod sandbox",
+        "# TYPE kubelet_running_pods gauge",
+        `kubelet_running_pods ${pods.length}`,
+        'kubernetes_build_info{git_version="v1.31.4"} 1',
+      ].join("\n"),
+    };
+  }
+
+  return { status: 404, body: "404 page not found" };
+}
+
+/* `ss -tln` on worker-02. As ivy, ss can't show other users' processes. */
+function socketList(): string {
+  return table(
+    ["State", "Recv-Q", "Send-Q", "Local Address:Port", "Peer Address:Port", "Process"],
+    [
+      ["LISTEN", "0", "4096", "127.0.0.1:10248", "0.0.0.0:*", ""],
+      ["LISTEN", "0", "4096", "127.0.0.1:10249", "0.0.0.0:*", ""],
+      ["LISTEN", "0", "4096", "127.0.0.53%lo:53", "0.0.0.0:*", ""],
+      ["LISTEN", "0", "128", "0.0.0.0:22", "0.0.0.0:*", ""],
+      ["LISTEN", "0", "4096", "127.0.0.1:35711", "0.0.0.0:*", ""],
+      ["LISTEN", "0", "4096", "*:10250", "*:*", ""],
+      ["LISTEN", "0", "4096", `*:${KUBELET_READ_ONLY_PORT}`, "*:*", ""],
+      ["LISTEN", "0", "4096", "*:10256", "*:*", ""],
+      ["LISTEN", "0", "128", "[::]:22", "[::]:*", ""],
+    ],
+  );
+}
+
 const CURL_TLS_ERROR = [
   "curl: (60) SSL certificate problem: unable to get local issuer certificate",
   "More details here: https://curl.se/docs/sslcerts.html",
@@ -3750,6 +4599,30 @@ function curlCommand(args: string[], inPod: boolean): string {
   const isApiServer =
     (host === API_SERVER.host && port === API_SERVER.port) ||
     (inPod && (inClusterNames.includes(host) || host === API_SERVER.serviceIp) && port === 443);
+
+  const plainHttp = (response: { status: number; body: string }): string =>
+    [
+      ...(includeHeaders
+        ? [
+            `HTTP/1.1 ${response.status} ${response.status === 200 ? "OK" : "Not Found"}`,
+            `Content-Type: ${response.body.startsWith("{") ? "application/json" : "text/plain; charset=utf-8"}`,
+            "",
+          ]
+        : []),
+      response.body,
+    ].join("\n");
+  const wrongVersion = "curl: (35) OpenSSL/3.0.13: error:0A00010B:SSL routines::wrong version number";
+
+  /* The kubelet's read-only port: plain HTTP, no authentication. */
+  const onNode = host === NODE.ip || (!inPod && (host === "localhost" || host === "127.0.0.1"));
+  if (onNode && port === KUBELET_READ_ONLY_PORT) {
+    return scheme === "https" ? wrongVersion : plainHttp(kubeletReadOnly(path));
+  }
+
+  /* etcd, with TLS switched off during OPS-2304. */
+  if (host === ETCD.host && port === ETCD.port) {
+    return scheme === "https" ? wrongVersion : plainHttp(etcdHttp(path));
+  }
 
   /* The kubelet has anonymous auth disabled, so it rejects anonymous calls. */
   const isKubelet = (host === NODE.ip || host === "localhost" || host === "127.0.0.1") && port === 10250;
@@ -3898,6 +4771,24 @@ function kubectl(raw: string): string {
     return visible.map(describeNetworkPolicy).join("\n\n\n");
   }
   if (verb === "get" && isRuntimeClass) return getRuntimeClass();
+
+  const isQuota = ["resourcequota", "resourcequotas", "quota"].includes(resource ?? "");
+  const isLimitRange = ["limitrange", "limitranges", "limits"].includes(resource ?? "");
+  if (verb === "top") return kubectlTop(resource, flags);
+  if (verb === "get" && isQuota) return getResourceQuotas(name, flags);
+  if (verb === "get" && isLimitRange) return getLimitRanges(name, flags);
+  if (verb === "describe" && (isQuota || isLimitRange)) {
+    const source: { name: string; namespace: string }[] = isQuota ? resourceQuotas : limitRanges;
+    const scoped = inScope(source, flags);
+    const visible = name ? scoped.filter((item) => item.name === name) : scoped;
+    if (name && visible.length === 0) return notFound(isQuota ? "resourcequotas" : "limitranges", name);
+    if (visible.length === 0) return noneFound(flags, true);
+    return visible
+      .map((item) =>
+        isQuota ? describeResourceQuota(item as ResourceQuotaObject) : describeLimitRange(item as LimitRangeObject),
+      )
+      .join("\n\n\n");
+  }
 
   if (verb === "delete" && isPod) return deletePod(name, flags);
 
@@ -4084,7 +4975,7 @@ function workloadLaunch(input: string): string {
   ].join("\n");
 }
 
-function zoneLogs(name: string | undefined, follow: boolean): string {
+function zoneLogs(name: string | undefined): string {
   if (!name) {
     return "error: zone name may not be empty";
   }
@@ -4110,24 +5001,6 @@ function zoneLogs(name: string | undefined, follow: boolean): string {
           `[zone ${zone.name}] workload ${pod.name} running image ${pod.image}`,
         );
       }
-    }
-
-    if (
-      follow &&
-      zone.name === "my-zone" &&
-      zone.pod === "web-server" &&
-      currentStage()?.title === "Launch a zoned workload"
-    ) {
-      lines.push("[zone my-zone] following logs for workload web-server");
-      lines.push("[zone my-zone] nginx: worker process started");
-      lines.push("[zone my-zone] GET / HTTP/1.1 200");
-      lines.push("");
-      lines.push("FINAL FLAG");
-      lines.push("----------");
-      lines.push("EDERA{ZONE_WORKLOAD_LAUNCH}");
-      lines.push("");
-      lines.push("Submit this flag to complete the CTF:");
-      lines.push("submit EDERA{ZONE_WORKLOAD_LAUNCH}");
     }
 
     return lines.join("\n");
@@ -4190,7 +5063,7 @@ function imageRemove(digest: string | undefined): string {
   images.splice(images.indexOf(image), 1);
   const output = [`removed image ${image.digest} (${image.reference})`];
 
-  if (image.digest === VULNERABLE_IMAGE_DIGEST && currentStage()?.flag === K07_FLAG) {
+  if (image.digest === VULNERABLE_IMAGE_DIGEST && currentStage()?.flag === IMAGE_FLAG) {
     output.push("", captureCurrentStage());
   }
 
@@ -4329,7 +5202,7 @@ function protectCli(input: string): string {
     if (subcommand === "list") return zoneList(input, name);
     if (subcommand === "launch") return zoneLaunch(input);
     if (subcommand === "logs") {
-      return zoneLogs(name, input.includes("--follow"));
+      return zoneLogs(name);
     }
   }
 
@@ -4366,7 +5239,7 @@ function submit(value: string): string {
     return [
       "CTF COMPLETE",
       "-----------",
-      "All ten OWASP-aligned flags captured and submitted.",
+      `All ${stages.length} NSA/CISA-aligned flags captured and submitted.`,
       "",
       "Your reward is waiting for you:",
       "https://edera.dev/stories/ocap-bounded-authority",
@@ -4388,14 +5261,14 @@ function submit(value: string): string {
   }
 
   /*
-   * K04 is about making the policy admit the workload, so naming the label
+   * The admission stage is about making the policy admit the workload, so naming the label
    * is not enough: the Pod must actually have been admitted.
    */
-  if (matched && stage.flag === K07_FLAG && !vulnerableImageRemoved()) {
+  if (matched && stage.flag === IMAGE_FLAG && !vulnerableImageRemoved()) {
     return "Not yet. That image is still in the cache. Remove it with protect image remove.";
   }
 
-  if (matched && stage.flag === K04_FLAG && !paymentsPod()) {
+  if (matched && stage.flag === ADMISSION_FLAG && !paymentsPod()) {
     return [
       "Not yet. payments-worker in customer-e is still 0/1.",
       "Knowing the label isn't enough: apply it to the namespace with kubectl label.",
@@ -4439,10 +5312,10 @@ function captureCurrentStage(): string {
 
   const next = currentStage();
 
-  /* K04 is captured by labelling; if that already happened, say so. */
-  const k04Ready =
-    next?.flag === K04_FLAG && isOnboarded(BLOCKED_NAMESPACE) && Boolean(paymentsPod());
-  const k07Ready = next?.flag === K07_FLAG && vulnerableImageRemoved();
+  /* Admission is captured by labelling; if that already happened, say so. */
+  const admissionReady =
+    next?.flag === ADMISSION_FLAG && isOnboarded(BLOCKED_NAMESPACE) && Boolean(paymentsPod());
+  const imageReady = next?.flag === IMAGE_FLAG && vulnerableImageRemoved();
 
   return [
     "FLAG CAPTURED",
@@ -4453,19 +5326,19 @@ function captureCurrentStage(): string {
     "",
     next
       ? `Objective ${String(state.stage + 1).padStart(2, "0")}: ${next.objective}${
-          k04Ready
+          admissionReady
             ? "\n  You've already admitted that workload. Submit the label you applied to capture this flag."
-            : k07Ready
+            : imageReady
               ? "\n  You've already removed that image. Submit its digest to capture this flag."
               : ""
         }`
       : [
           "CTF COMPLETE",
           "-----------",
-          "All ten OWASP-aligned flags captured and submitted.",
+          `All ${stages.length} NSA/CISA-aligned flags captured and submitted.`,
           "",
-          "Every workload in this lab ran in its own Edera zone.",
-          "Misconfigurations still happened, but each one stayed inside its zone.",
+          "Every workload in a zone kept its misconfigurations inside that zone.",
+          "The one that wasn't in a zone shared the node's kernel with all of them.",
           "",
           "Your reward is waiting for you:",
           "https://edera.dev/stories/ocap-bounded-authority",
@@ -4498,7 +5371,7 @@ async function runCommand(command: string): Promise<string> {
     const stage = currentStage();
 
     if (!stage) {
-      return "All ten OWASP flags captured. The investigation is complete.";
+      return `All ${stages.length} NSA/CISA flags captured. The investigation is complete.`;
     }
 
     return [
@@ -4578,6 +5451,8 @@ async function runCommand(command: string): Promise<string> {
     return listDirectory(target, long, hidden);
   }
 
+  if (binary === "etcdctl") return etcdctl(raw);
+  if (binary === "ss" || binary === "netstat") return socketList();
   if (binary === "cat") return readFile(args[0]);
   if (binary === "curl") return curlCommand(args, false);
 
@@ -4631,8 +5506,9 @@ async function runCommand(command: string): Promise<string> {
  * absence is the clue the player is supposed to spot for themselves.
  */
 function podLayer(pod: Pod): "zone" | "host" | "unknown" {
-  // All initial workloads are zone-backed. Inspection reveals the security
-  // finding; it does not imply that the workload is running on the host.
+  // Zone-backed workloads are shown as such straight away. A pod without a
+  // zone stays "unknown" until the player inspects it, because spotting it
+  // is the sandboxed-runtime stage.
   if (pod.runtimeClass && pod.zone) return "zone";
   if (state.inspected.has(pod.name)) return "host";
   return "unknown";
@@ -4644,15 +5520,19 @@ function renderArchitecture(): string {
   );
   const found = exposed.length > 0;
 
+  /* Pods the player has inspected and found running outside any zone. */
+  const hostPods = pods.filter((pod) => !pod.zone && state.inspected.has(pod.name));
+  const onHost = hostPods.length > 0;
+
   /*
-   * K02: once the cluster-admin binding has been captured, every Secret is
+   * RBAC: once the cluster-admin binding has been captured, every Secret is
    * shown as reachable, because that token can read them all through the
    * API regardless of which zone a workload runs in. Before that, only the
    * Secrets the player has listed appear, as neutral chips.
    */
   const adminBinding = clusterRoleBindings.find((binding) => binding.name === "report-bot-admin");
   const adminSubject = adminBinding?.subjects.find((subject) => subject.kind === "ServiceAccount");
-  const rbacFound = state.captured.includes("EDERA{K02_EXCESSIVE_PERMISSIONS}") && Boolean(adminSubject);
+  const rbacFound = state.captured.includes(RBAC_FLAG) && Boolean(adminSubject);
   const adminToken = secrets.find(
     (secret) => secret.annotations?.["kubernetes.io/service-account.name"] === adminSubject?.name &&
       secret.namespace === adminSubject?.namespace,
@@ -4710,7 +5590,7 @@ function renderArchitecture(): string {
     .map((namespace) => `<div class="tenant-card layer-unknown"><span class="tenant-dot"></span><strong>${namespace}</strong><span class="tenant-caption">no running workloads</span>${chipsOnce(namespace)}</div>`)
     .join("");
 
-  /* K04: the blocked tenant appears once the player has come across it. */
+  /* Admission: the blocked tenant appears once the player has come across it. */
   const blockedCard =
     state.blockedTenantSeen && !paymentsPod()
       ? `<div class="tenant-card tenant-blocked"><span class="tenant-dot"></span><strong>${BLOCKED_NAMESPACE}/${PAYMENTS.deployment}</strong><span class="tenant-caption">0/1 · denied by ${ONBOARDING_POLICY}</span></div>`
@@ -4728,14 +5608,14 @@ function renderArchitecture(): string {
     : "";
 
   return `
-    <section class="architecture ${found || rbacFound ? "architecture-compromised" : ""}">
+    <section class="architecture ${found || rbacFound || onHost ? "architecture-compromised" : ""}">
       <div class="section-heading">
         <div>
           <span class="eyebrow">CURRENT ARCHITECTURE</span>
           <h2>Edera-isolated workloads</h2>
         </div>
-        <span class="status-pill ${found || rbacFound ? "status-danger" : "status-unknown"}">
-          ${rbacFound ? "CLUSTER-ADMIN TOKEN EXPOSED" : found ? "PRIVILEGE ESCALATION ENABLED" : `${pods.length} RUNNING WORKLOAD${pods.length === 1 ? "" : "S"}`}
+        <span class="status-pill ${found || rbacFound || onHost ? "status-danger" : "status-unknown"}">
+          ${rbacFound ? "CLUSTER-ADMIN TOKEN EXPOSED" : onHost ? "WORKLOAD ON HOST KERNEL" : found ? "PRIVILEGE ESCALATION ENABLED" : `${pods.length} RUNNING WORKLOAD${pods.length === 1 ? "" : "S"}`}
         </span>
       </div>
 
@@ -4746,7 +5626,7 @@ function renderArchitecture(): string {
         : `<div class="architecture-empty"><strong>NO WORKLOADS SCHEDULED</strong><span>Apply a manifest from <code>~/manifests</code> to restore a workload.</span></div>`}
 
       <div class="kernel-connector"></div>
-      <div class="kernel-box ${found ? "kernel-compromised" : ""}">
+      <div class="kernel-box ${found || onHost ? "kernel-compromised" : ""}">
         <strong>HOST KERNEL</strong>
         <span>${NODE.kernelVersion} · ${NODE.name}</span>
       </div>
@@ -4757,6 +5637,15 @@ function renderArchitecture(): string {
           <div>
             <strong>${adminSubject.namespace}/${adminSubject.name} is bound to cluster-admin</strong>
             <span>Its long-lived token can read all ${secrets.length} Secrets in ${exposedNamespaces} namespaces. Zones isolate kernels, not API access, so scope service accounts to the namespaces and verbs they need.</span>
+          </div>
+        </div>` : ""}
+
+      ${onHost ? `
+        <div class="blast-radius">
+          <span class="blast-icon">!</span>
+          <div>
+            <strong>${hostPods.map((pod) => `${pod.namespace}/${pod.name}`).join(", ")} runs on the host kernel</strong>
+            <span>No <code>runtimeClassName</code>, so the CRI fell back to runc. A kernel exploit in this container compromises ${NODE.name} itself.</span>
           </div>
         </div>` : ""}
 
@@ -4899,7 +5788,7 @@ function renderTerminal(): string {
                 <div class="terminal-brand">EDERA</div>
                 <div class="terminal-lab">ISOLATION RESEARCH LAB</div>
                 <div class="terminal-challenge">
-                  SECURITY CHALLENGE 02
+                  SECURITY CHALLENGE 03
                 </div>
 
                 <div class="terminal-rule"></div>
@@ -4908,7 +5797,7 @@ function renderTerminal(): string {
                   You are auditing a node that runs a mix of zone-backed
                   and default-runtime workloads.
                   <br />
-                  Ten flags mapped to the OWASP Kubernetes Top 10. You must capture them in order.
+                  ${stages.length} flags mapped to the NSA/CISA Kubernetes Hardening Guide. You must capture them in order.
                 </div>
 
                 <div class="terminal-rule"></div>
@@ -4972,7 +5861,7 @@ function render(): void {
               <em>#3</em>
             </h1>
 
-  <div className="mission-description">
+  <div class="mission-description">
   <p>
     The <strong>NSA</strong> are concerned your cluster is not correctly hardened<br> 
     Use the joint <i><a href="https://media.defense.gov/2022/Aug/29/2003066362/-1/-1/0/CTR_KUBERNETES_HARDENING_GUIDANCE_1.2_20220829.PDF">CISA/NSA Hardening Guide</a></i> to find flaws.
@@ -4981,7 +5870,7 @@ function render(): void {
   <p>
     Find <strong>all flaws</strong>
     before the US government shuts down your operations.<br> 
-    Capture all <b>10 flags</b> to complete the exercise.
+    Capture all <b>${stages.length} flags</b> to complete the exercise.
   </p>
 </div>
           </div>
@@ -5065,11 +5954,11 @@ function render(): void {
             ? `
               <section class="completion-card">
                 <span class="eyebrow">INVESTIGATION COMPLETE</span>
-                <h2>Ten findings. One hardened cluster.</h2>
+                <h2>${stages.length} findings. One hardened cluster.</h2>
                 <p>
-                  customer-c/recommendation allowed privilege escalation because
-                  its container security context was misconfigured. Your reward is
-                  waiting at
+                  Every finding maps to a section of the NSA/CISA Kubernetes
+                  Hardening Guide, from pod security contexts to etcd and audit
+                  policy. Your reward is waiting at
                   <a
                     href="https://edera.dev/stories/ocap-bounded-authority"
                     target="_blank"
