@@ -4975,7 +4975,7 @@ function render(): void {
   <div className="mission-description">
   <p>
     The <strong>NSA</strong> are concerned your cluster is not correctly hardened<br> 
-    Use the joint<i><a href="https://media.defense.gov/2022/Aug/29/2003066362/-1/-1/0/CTR_KUBERNETES_HARDENING_GUIDANCE_1.2_20220829.PDF"></a>CISA/NSA Hardening Guide</i> to find flaws.
+    Use the joint <i><a href="https://media.defense.gov/2022/Aug/29/2003066362/-1/-1/0/CTR_KUBERNETES_HARDENING_GUIDANCE_1.2_20220829.PDF">CISA/NSA Hardening Guide</a></i> to find flaws.
   </p>
 
   <p>
